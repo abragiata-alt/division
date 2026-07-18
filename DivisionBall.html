@@ -339,7 +339,7 @@ function resize() {
     const physicalW = screen.width * dpr;
     const physicalH = screen.height * dpr;
     const physicalScale = Math.min(physicalW / BASE_W, physicalH / BASE_H);
-    fontScale = Math.min(2.0, 1 / physicalScale * 0.9);
+    fontScale = Math.min(2.0, 1 / physicalScale * 1);
   } else {
     fontScale = 1;
   }
