@@ -133,6 +133,7 @@ let unlockAnimUntil = 0, unlockAnimText = '';   // Freischalt-Animation (dezent)
 // Rotes Aufflammen beim Entfernen einer gesammelten Zahl (einmaliger Puls, kein Blinken).
 // Jeder Eintrag: {x, y, r, until} - Position, Radius, Endzeitpunkt.
 let removeFlashes = [];
+let introStartPending = false;   // Intro-Start-Tipp erkannt, Vollbild folgt bei touchend
 
 // Punkte-Erklaerung am Ende der Anleitung (PLATZHALTER - Text frei aenderbar).
 // Erscheint in den letzten Sekunden des Anleitungsfilms.
@@ -1673,20 +1674,13 @@ function onDown(e) {
   e.preventDefault();
   const p = pos(e), tNow = now();
 
-  // Intro: Standbild muss sichtbar sein (t >= 0.75) damit Start-Tipp gilt
+  // Intro: Standbild muss sichtbar sein (t >= 0.75) damit Start-Tipp gilt.
+  // Das Vollbild wird NICHT hier (touchstart) angefordert - viele mobile Browser
+  // lehnen das ab. Wir merken uns nur den gueltigen Start-Tipp; das Vollbild wird
+  // beim Loslassen (touchend/onUp) ausgeloest, wo die Geste akzeptiert wird.
   if (gameState === S.INTRO) {
     const elapsed = performance.now() - introStartTime;
-    if (elapsed >= INTRO_DURATION * 0.75) {
-      // Ein Druck -> sofort Vollbild UND Spielwechsel zusammen. Keine blockierende
-      // Pause davor. Die Groesse/Schrift setzt der fullscreenchange-Handler danach
-      // ohnehin selbst (siehe unten, setTimeout(resize,...)).
-      const el = document.documentElement;
-      if (el.requestFullscreen) el.requestFullscreen().catch(()=>{});
-      else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
-      else if (el.mozRequestFullScreen) el.mozRequestFullScreen();
-      lockPortrait();
-      gameState = S.IDLE;
-    }
+    if (elapsed >= INTRO_DURATION * 0.75) introStartPending = true;
     return;
   }
 
@@ -1830,11 +1824,38 @@ function onMove(e) {
 function onUp(e) {
   e.preventDefault();
   if (mulScrollDragging) { mulScrollDragging = false; mulScrollMoved = false; }
+
+  // Intro-Start: Vollbild beim Loslassen (touchend) anfordern - hier akzeptieren
+  // die mobilen Browser die Geste zuverlaessig. Danach ins Spiel wechseln.
+  if (introStartPending && gameState === S.INTRO) {
+    introStartPending = false;
+    const el = document.documentElement;
+    if (el.requestFullscreen) el.requestFullscreen().catch(()=>{});
+    else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+    else if (el.mozRequestFullScreen) el.mozRequestFullScreen();
+    lockPortrait();
+    gameState = S.IDLE;
+    return;
+  }
+
   if (gameState === S.IDLE) {                             // Z.1752
     if (isDraggingSlider) { isDraggingSlider = false; saveGameState(); return; }
     if (isDraggingDiffSlider) { isDraggingDiffSlider = false; saveGameState(); return; }
   }
   if (gameState === S.CHARGING) releaseBall();            // Z.1764
+
+  // Absicherung ("Notnagel"): Falls Vollbild fehlt (z.B. nach App-Wechsel, wo das
+  // Vordergrund-Signal vom Browser nicht als Geste akzeptiert wurde), beim echten
+  // Loslassen wiederherstellen. Greift NUR wenn kein Vollbild aktiv ist, stoert also
+  // den Normalfall nicht. Nicht bei simulierten Demo-Klicks (sonst Ruckeln im Film).
+  if (!e.__demo && isPhone() &&
+      !document.fullscreenElement && !document.webkitFullscreenElement && !document.mozFullScreenElement) {
+    const el = document.documentElement;
+    if (el.requestFullscreen) el.requestFullscreen().catch(()=>{});
+    else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+    else if (el.mozRequestFullScreen) el.mozRequestFullScreen();
+    lockPortrait();
+  }
 }
 
 function updateSliderValue(touchX) {                      // Z.1984
