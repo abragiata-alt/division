@@ -132,6 +132,10 @@ let multiplierMaxScroll = 0;     // maximaler Scroll-Weg (wird beim Zeichnen ges
 let mulScrollDragging = false, mulScrollStartY = 0, mulScrollStartOffset = 0, mulScrollMoved = false;
 let unlockAnimUntil = 0, unlockAnimText = '';   // Freischalt-Animation (dezent)
 
+// Rotes Aufflammen beim Entfernen einer gesammelten Zahl (einmaliger Puls, kein Blinken).
+// Jeder Eintrag: {x, y, r, until} - Position, Radius, Endzeitpunkt.
+let removeFlashes = [];
+
 // Punkte-Erklaerung am Ende der Anleitung (PLATZHALTER - Text frei aenderbar).
 // Erscheint in den letzten Sekunden des Anleitungsfilms.
 const demoInfoTitle = 'Punkte';
@@ -1078,6 +1082,8 @@ function onDraw() {                                       // Z.560
   if (gameState === S.FLYING || gameState === S.EVALUATING || gameState === S.ANIMATING)
     drawNumberPool();                                    // Z.667
 
+  drawRemoveFlashes();
+
   if (gameState === S.RESULT) drawResultMessage();
   if (gameState === S.CONFIRM_DIFFICULTY) drawConfirmDifficultyDialog();
   if (gameState === S.HIGHSCORE) drawHighscoreOverlay();
@@ -1116,6 +1122,25 @@ function drawUnlockAnim() {
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.fillText(unlockAnimText, cx, cy);
   ctx.restore();
+}
+
+// Rotes Aufflammen beim Entfernen (einmaliger Puls, verblasst sanft, kein Blinken).
+function drawRemoveFlashes() {
+  if (!removeFlashes.length) return;
+  const tNow = now();
+  for (let i = removeFlashes.length - 1; i >= 0; i--) {
+    const f = removeFlashes[i];
+    const left = f.until - tNow;
+    if (left <= 0) { removeFlashes.splice(i,1); continue; }
+    const alpha = Math.max(0, Math.min(1, left / 400));   // 1 -> 0 (verblassen)
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    const g = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, f.r);
+    g.addColorStop(0, '#ff5252'); g.addColorStop(1, '#c62828');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(f.x, f.y, f.r, 0, Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
 }
 
 // Punkte-Erklaerung unter dem Endbild der Anleitung. Sichtbar erst, wenn der Film
@@ -1228,6 +1253,7 @@ function startCharging() {                                // Z.2029
   dividerRattleTimer = chargingStartTime;
   springCompression = 0;
   collectedNumbers = [];
+  removeFlashes = [];
   wasSkipped = false;
   dornDividers = findValidDividerCombination(score, activeDornCount);
 }
@@ -1478,6 +1504,7 @@ function resetGame() {                                    // Z.2507
   springCompression = 0;
   collectedNumbers = [];
   numberPool = [];
+  removeFlashes = [];
   currentMultiplier = 1;
   proCountdownActive = false;
   updateActiveDornCount();
@@ -1596,11 +1623,15 @@ function hitCollected(px, py) {                           // Z.1818
     const dx = px - xOffset, dy = py - yOffset;
     if (Math.sqrt(dx*dx + dy*dy) < 24) {
       const removed = collectedNumbers.splice(i,1)[0];
+      const flashUntil = now() + 400;   // kurzes Aufflammen
+      // 1) obere, angeklickte Kugel an ihrer Position rot aufflammen lassen
+      removeFlashes.push({ x: xOffset, y: yOffset, r: 24, until: flashUntil });
+      // 2) zugehoerige untere Auswahlkugel ebenfalls rot aufflammen (immer)
+      const poolBtn = numberPool.filter(n => n.value === removed.value)[0];
+      if (poolBtn) removeFlashes.push({ x: poolBtn.x, y: poolBtn.y, r: poolBtn.radius, until: flashUntil });
+      // Auswahlkugel nur abwaehlen, wenn keine weitere gleiche mehr gesammelt ist
       const still = collectedNumbers.filter(c => c.value === removed.value).length;
-      if (still === 0) {
-        const b = numberPool.filter(n => n.value === removed.value)[0];
-        if (b) b.clicked = false;
-      }
+      if (still === 0 && poolBtn) poolBtn.clicked = false;
       return true;
     }
     xOffset += G.stepX;
