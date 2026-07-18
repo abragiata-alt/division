@@ -265,7 +265,8 @@ const BASE_W = 900, BASE_H = 1560;
 // Handy oder Rechner? Ein schmales Hochformat-Fenster ist ein Handy.
 function isPhone() {
   const w = window.innerWidth, h = window.innerHeight;
-  return (h > w) && (w <= 820);
+  const touch = navigator.maxTouchPoints > 0 || /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  return touch && (h > w || w <= 820);
 }
 
 function resize() {
@@ -1368,11 +1369,7 @@ function onDown(e) {
   if (gameState === S.INTRO) {
     const elapsed = performance.now() - introStartTime;
     if (elapsed >= INTRO_DURATION * 0.75) {
-      // Vollbild anfordern
-      const el = document.documentElement;
-      if (el.requestFullscreen) el.requestFullscreen();
-      else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
-      gameState = S.IDLE;
+      gameState = S.IDLE; // wird in onUp zu Vollbild
     }
     return;
   }
@@ -1504,6 +1501,12 @@ function onMove(e) {
 
 function onUp(e) {
   e.preventDefault();
+  // Vollbild beim ersten touchend anfordern (funktioniert auf Android)
+  if (!document.fullscreenElement && !document.webkitFullscreenElement && isPhone()) {
+    const el = document.documentElement;
+    if (el.requestFullscreen) el.requestFullscreen().catch(()=>{});
+    else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+  }
   if (gameState === S.IDLE) {                             // Z.1752
     if (isDraggingSlider) { isDraggingSlider = false; saveGameState(); return; }
     if (isDraggingDiffSlider) { isDraggingDiffSlider = false; saveGameState(); return; }
