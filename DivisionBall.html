@@ -294,8 +294,11 @@ function resize() {
   W = BASE_W; H = BASE_H;
 
   if (phone) {
-    const scale = Math.min(winW / BASE_W, winH / BASE_H);
-    fontScale = Math.min(2.0, 1 / scale * 0.45);
+    // Echte Hardware-Pixel nehmen - jeder Browser meldet das gleich
+    const physicalW = screen.width * dpr;
+    const physicalH = screen.height * dpr;
+    const physicalScale = Math.min(physicalW / BASE_W, physicalH / BASE_H);
+    fontScale = Math.min(2.0, 1 / physicalScale * 0.45);
   } else {
     fontScale = 1;
   }
