@@ -1506,10 +1506,11 @@ function onMove(e) {
 function onUp(e) {
   e.preventDefault();
   // Vollbild beim ersten touchend anfordern (funktioniert auf Android)
-  if (!document.fullscreenElement && !document.webkitFullscreenElement && isPhone()) {
+  if (!document.fullscreenElement && !document.webkitFullscreenElement && !document.mozFullScreenElement && isPhone()) {
     const el = document.documentElement;
     if (el.requestFullscreen) el.requestFullscreen().catch(()=>{});
     else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+    else if (el.mozRequestFullScreen) el.mozRequestFullScreen();
   }
   if (gameState === S.IDLE) {                             // Z.1752
     if (isDraggingSlider) { isDraggingSlider = false; saveGameState(); return; }
@@ -2006,6 +2007,7 @@ document.addEventListener('visibilitychange', function(){ if (document.hidden) s
 // Vollbild: nach dem Wechsel kurz warten bis Browser fertig ist, dann neu skalieren
 document.addEventListener('fullscreenchange',       () => setTimeout(resize, 400));
 document.addEventListener('webkitfullscreenchange', () => setTimeout(resize, 400));
+document.addEventListener('mozfullscreenchange',    () => setTimeout(resize, 400));
 
 resize();
 loadGameState();
