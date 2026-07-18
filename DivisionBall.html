@@ -367,9 +367,11 @@ function resize() {
 function initializePositions() {                          // Z.266
   if (isInitialized || W <= 0 || H <= 0) return;
 
-  // Reihen-Zustand aus der Runde ableiten (ohne Animation beim Init/Resize)
-  multiplierRowCount = (round >= 25) ? 5 : (round >= 20) ? 4 : 3;
-  expandedLayout = (multiplierRowCount > 3);
+  // Reihen-Zustand aus der Runde ableiten (ohne Animation beim Init/Resize).
+  // ENTKOPPELT: Multiplikator-Reihen (15/27) und Collection-Vergroesserung (21)
+  // sind jetzt drei getrennte Schwellen.
+  multiplierRowCount = (round >= 27) ? 5 : (round >= 15) ? 4 : 3;
+  expandedLayout = (round >= 21);   // Collection Area groesser ab Runde 21
 
   // Im erweiterten Layout beginnt die Bank etwas tiefer (Collection Area groesser),
   // dafuer wird die vertikale Flugbahn gestaucht (Ecke rutscht nach unten),
@@ -439,21 +441,23 @@ function updateActiveDornCount() {                        // Z.348
     activeDornCount = round<=5?1:round<=10?2:round<=20?3:round<=30?4:4+Math.floor((round-30)/10);
 }
 
-// Legt anhand der Runde fest, wie viele Multiplikator-Reihen sichtbar sind.
-// Gilt fuer ALLE Schwierigkeitsstufen gleich (Feintuning pro Stufe spaeter).
+// Legt anhand der Runde fest, wie viele Multiplikator-Reihen sichtbar sind und
+// ob die Collection Area vergroessert ist. ENTKOPPELT: drei getrennte Schwellen.
 // Loest bei einer NEUEN Freischaltung die dezente Belohnungs-Animation aus.
 function updateExpansion() {
   let rows = 3;
-  if (round >= 25) rows = 5;
-  else if (round >= 20) rows = 4;
+  if (round >= 27) rows = 5;
+  else if (round >= 15) rows = 4;
+  const nowExpanded = (round >= 21);
 
-  if (rows > multiplierRowCount && isInitialized) {
-    // Neue Reihe(n) gerade freigeschaltet -> dezente Animation
+  // Animation, wenn eine neue Multiplikator-Reihe ODER die Collection-Vergroesserung
+  // gerade freigeschaltet wird.
+  if (isInitialized && (rows > multiplierRowCount || (nowExpanded && !expandedLayout))) {
     unlockAnimText = 'Freigeschaltet!';
     unlockAnimUntil = now() + 1800;
   }
   multiplierRowCount = rows;
-  expandedLayout = (rows > 3);
+  expandedLayout = nowExpanded;
 }
 
 function positionDorns() {                                // Z.386
@@ -2068,7 +2072,7 @@ function startDemo() {
   flightDuration = 300000;              // beim Federhalten deutlich sinken
   collectedNumbers = []; numberPool = []; bowlPieces = []; activePieces = [];
   currentMultiplier = 1;
-  updateExpansion();                    // round=20 -> Reihe 4 aktiv, Layout erweitern
+  updateExpansion();                    // round=20 -> Reihe 4 aktiv (ab R15), Collection noch klein (erst ab R21)
   isInitialized = false; initializePositions();
   activeDornCount = 5;                  // Legend, Runde 20 -> 5 Dornen (nach Init setzen)
   positionDorns();
