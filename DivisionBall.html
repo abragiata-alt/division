@@ -66,8 +66,13 @@ function later(fn, ms) {
   return setTimeout(fn, demoActive ? ms / DEMO_SPEED : ms);
 }
 
-const S = { IDLE:0, CHARGING:1, FLYING:2, ANIMATING:3, EVALUATING:4,
+const S = { INTRO:9, IDLE:0, CHARGING:1, FLYING:2, ANIMATING:3, EVALUATING:4,
             RESULT:5, CONFIRM_DIFFICULTY:6, BONUS:7, HIGHSCORE:8 };
+
+// Intro-Sequenz
+let introStartTime = 0;
+const INTRO_DURATION = 1500; // ms
+let introBalls = [];
 
 let gameState = S.IDLE;
 let score = 100n, round = 1, displayScore = 100n, displayRound = 1;
@@ -1359,11 +1364,17 @@ function onDown(e) {
   e.preventDefault();
   const p = pos(e), tNow = now();
 
-  // Beim ersten Tippen auf dem Handy Vollbild anfordern
-  if (!e.__demo && isPhone() && !document.fullscreenElement && !document.webkitFullscreenElement) {
-    const el = document.documentElement;
-    if (el.requestFullscreen) el.requestFullscreen();
-    else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+  // Intro: Standbild muss sichtbar sein (t >= 0.75) damit Start-Tipp gilt
+  if (gameState === S.INTRO) {
+    const elapsed = performance.now() - introStartTime;
+    if (elapsed >= INTRO_DURATION * 0.75) {
+      // Vollbild anfordern
+      const el = document.documentElement;
+      if (el.requestFullscreen) el.requestFullscreen();
+      else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+      gameState = S.IDLE;
+    }
+    return;
   }
 
   // Film laeuft: jeder ECHTE Klick beendet ihn. Simulierte nicht.
@@ -1846,11 +1857,102 @@ function drawDemoButton() {
 }
 
 // ===============================================================
+//  INTRO
+// ===============================================================
+
+function startIntro() {
+  gameState = S.INTRO;
+  introStartTime = performance.now();
+  introBalls = [];
+}
+
+function updateIntro() {
+  const elapsed = performance.now() - introStartTime;
+  const t = Math.min(elapsed / INTRO_DURATION, 1);
+
+  // Hintergrund
+  ctx.fillStyle = '#0d0d18';
+  ctx.fillRect(0, 0, W, H);
+
+  const cx = W / 2, cy = H / 2;
+
+  // Animations-Phasen: 0-0.3 eine Kugel fällt, 0.3-0.6 zerfällt in 2,
+  // 0.6-0.8 zerfällt in 4, 0.8-1.0 zerfällt in 8 → Standbild
+  function drawBall(x, y, r, alpha) {
+    const g = ctx.createRadialGradient(x - r*0.3, y - r*0.3, 0, x, y, r);
+    g.addColorStop(0, `rgba(100,160,220,${alpha})`);
+    g.addColorStop(0.6, `rgba(30,100,180,${alpha})`);
+    g.addColorStop(1, `rgba(10,50,120,${alpha})`);
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = `rgba(255,215,0,${alpha})`; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.stroke();
+    // Glanz
+    ctx.fillStyle = `rgba(255,255,255,${alpha * 0.5})`;
+    ctx.beginPath(); ctx.arc(x - r*0.3, y - r*0.3, r*0.25, 0, Math.PI*2); ctx.fill();
+  }
+
+  if (t < 0.25) {
+    // Phase 1: große Kugel fällt von oben rein
+    const fallT = t / 0.25;
+    const ballY2 = cy * 0.3 + fallT * (cy - cy * 0.3);
+    drawBall(cx, ballY2, 80, 1);
+
+  } else if (t < 0.5) {
+    // Phase 2: zerfällt in 2
+    const splitT = (t - 0.25) / 0.25;
+    const spread = splitT * 120;
+    drawBall(cx - spread, cy, 55, 1);
+    drawBall(cx + spread, cy, 55, 1);
+
+  } else if (t < 0.75) {
+    // Phase 3: jede zerfällt in 2 → 4 Kugeln
+    const splitT = (t - 0.5) / 0.25;
+    const spreadX = 120 + splitT * 80;
+    const spreadY = splitT * 100;
+    const r = 38;
+    drawBall(cx - spreadX, cy - spreadY, r, 1);
+    drawBall(cx - spreadX, cy + spreadY, r, 1);
+    drawBall(cx + spreadX, cy - spreadY, r, 1);
+    drawBall(cx + spreadX, cy + spreadY, r, 1);
+
+  } else {
+    // Phase 4: 8 Kugeln → Standbild
+    const r = 26;
+    const positions = [
+      [cx - 200, cy - 160], [cx - 60, cy - 200], [cx + 60, cy - 200], [cx + 200, cy - 160],
+      [cx - 200, cy + 160], [cx - 60, cy + 200], [cx + 60, cy + 200], [cx + 200, cy + 160],
+    ];
+    for (const [bx, by] of positions) drawBall(bx, by, r, 1);
+
+    // Titel
+    ctx.font = 'bold ' + fs(64) + 'px Arial';
+    ctx.fillStyle = '#FFD700';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.shadowColor = '#000'; ctx.shadowBlur = 12;
+    ctx.fillText('Division Ball', cx, cy - 20);
+
+    // Start
+    ctx.font = 'bold ' + fs(36) + 'px Arial';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText('Start', cx, cy + 40);
+    ctx.shadowBlur = 0;
+  }
+}
+
+// ===============================================================
 //  HAUPTSCHLEIFE
 // ===============================================================
 
 function loop() {
   const tNow = now();
+
+  // Intro-Sequenz
+  if (gameState === S.INTRO) {
+    updateIntro();
+    requestAnimationFrame(loop);
+    return;
+  }
 
   if (gameState === S.CHARGING) {                         // Z.2046
     const elapsed = tNow - chargingStartTime;
@@ -1902,6 +2004,7 @@ resize();
 loadGameState();
 loadHighscores();
 dornDividers = findValidDividerCombination(score, activeDornCount);
+startIntro();
 loop();
 </script>
 </body>
