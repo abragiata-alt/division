@@ -264,9 +264,13 @@ const BASE_W = 900, BASE_H = 1560;
 
 // Handy oder Rechner? Ein schmales Hochformat-Fenster ist ein Handy.
 function isPhone() {
+  // Touch-Gerät erkennen: UserAgent, Touch-Punkte, oder schmales Hochformat-Fenster
+  const ua = navigator.userAgent || '';
+  const isMobileUA = /Android|iPhone|iPad|iPod|Mobile|Tablet/i.test(ua);
+  const isTouch = navigator.maxTouchPoints > 1;
   const w = window.innerWidth, h = window.innerHeight;
-  const touch = navigator.maxTouchPoints > 0 || /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-  return touch && (h > w || w <= 820);
+  const isNarrow = w <= 1024 && h > w;
+  return isMobileUA || (isTouch && isNarrow);
 }
 
 function resize() {
