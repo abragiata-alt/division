@@ -743,7 +743,7 @@ function fitFontForPool() {                               // Z.1208
   // Bei 2-Spalten-Layout (lange Zahlen) sind die Kugeln groesser -> mehr Platz.
   const r = (numberPool[0] && numberPool[0].radius) || 45;
   const buttonSpacing = r * 2.0;
-  const MIN_FONT = fs(20);                 // wird nicht unterschritten
+  const MIN_FONT = fs(24);                 // wird nicht unterschritten
   let sharedFontSize = fs(36);
   for (const btn of numberPool) {
     const text = String(btn.value);
