@@ -673,23 +673,25 @@ function drawNumberBank() {                               // Z.1097
   ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
   ctx.fillText('NUMBER BANK', (bankLeft+bankRight)/2, bankTop - 15);
 
-  // Sichtbares Fenster fuer die Multiplikatoren: immer nur so hoch wie 3 Reihen.
-  // Bei mehr als 3 Reihen wird der Bereich scrollbar (Clipping + multiplierScrollY).
   const win = multiplierWindow();
   const scrollable = multiplierRowCount > 3;
   multiplierMaxScroll = scrollable ? Math.max(0, (multiplierRowCount-3)*48) : 0;
   if (multiplierScrollY > multiplierMaxScroll) multiplierScrollY = multiplierMaxScroll;
   if (multiplierScrollY < 0) multiplierScrollY = 0;
 
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(bankLeft, win.top, bankRight-bankLeft, win.height);
-  ctx.clip();
+  // Nur wenn wirklich scrollbar (>3 Reihen) wird geclippt und verschoben.
+  // Bei 3 Reihen (Normalfall) direkt zeichnen - kein clip() pro Frame (Firefox-Performance).
+  const off = scrollable ? multiplierScrollY : 0;
+  if (scrollable) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(bankLeft, win.top, bankRight-bankLeft, win.height);
+    ctx.clip();
+  }
 
   for (const btn of multiplierButtons) {                  // Z.1118
-    const drawY = btn.y - multiplierScrollY;
-    // ausserhalb des Fensters? ueberspringen (leichte Reserve)
-    if (drawY + btn.height/2 < win.top - 4 || drawY - btn.height/2 > win.top + win.height + 4) continue;
+    const drawY = btn.y - off;
+    if (scrollable && (drawY + btn.height/2 < win.top - 4 || drawY - btn.height/2 > win.top + win.height + 4)) continue;
     const isActive = (btn.value === currentMultiplier && currentMultiplier !== 1);
     ctx.strokeStyle = isActive ? '#FFD700' : '#666666';
     ctx.lineWidth = 2;
@@ -698,7 +700,7 @@ function drawNumberBank() {                               // Z.1097
     ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
     ctx.fillText(btn.label, btn.x + btn.width/2, drawY + 6);
   }
-  ctx.restore();
+  if (scrollable) ctx.restore();
 
   // Scroll-Indikator (dezent), nur wenn scrollbar
   if (scrollable && multiplierMaxScroll > 0) {
@@ -1829,8 +1831,11 @@ function onMove(e) {
 function onUp(e) {
   e.preventDefault();
   if (mulScrollDragging) { mulScrollDragging = false; mulScrollMoved = false; }
-  // Firefox braucht touchend fuer Vollbild
-  if (!document.fullscreenElement && !document.webkitFullscreenElement && !document.mozFullScreenElement && isPhone() && gameState !== S.INTRO) {
+  // Firefox braucht touchend fuer Vollbild - aber NICHT bei simulierten Demo-Klicks,
+  // sonst wird waehrend des schnellen Anleitungsfilms staendig Fullscreen/Orientation
+  // angefordert (ruckelt in Firefox stark).
+  if (!e.__demo &&
+      !document.fullscreenElement && !document.webkitFullscreenElement && !document.mozFullScreenElement && isPhone() && gameState !== S.INTRO) {
     const el = document.documentElement;
     if (el.requestFullscreen) el.requestFullscreen().catch(()=>{});
     else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
