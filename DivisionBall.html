@@ -1169,17 +1169,17 @@ function drawDemoInfo() {
   ctx.strokeStyle = '#FFD700'; ctx.lineWidth = 3;
   rr(cx - bw/2, top, bw, bh, 20); ctx.stroke();
 
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
   ctx.fillStyle = '#FFD700';
   ctx.font = 'bold ' + fs(42) + 'px Arial';
   let y = top + padY + titleH/2;
-  ctx.fillText(demoInfoTitle, cx, y);
+  ctx.fillText(demoInfoTitle, cx - bw/2 + 30, y);
 
   y += titleH/2 + lineH/2;
   ctx.font = 'bold ' + fs(30) + 'px Arial';
   ctx.fillStyle = '#ffffff';
   for (const line of demoInfoLines) {
-    ctx.fillText(line, cx, y);
+    ctx.fillText(line, cx - bw/2 + 30, y);
     y += lineH;
   }
   ctx.restore();
