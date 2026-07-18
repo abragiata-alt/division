@@ -1,0 +1,1908 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DivisionBall</title>
+<style>
+  html {
+    margin: 0; padding: 0;
+    width: 100%; height: 100%;
+    background: #0d0d18;
+  }
+  html, body {
+    margin: 0; padding: 0;
+    background: #0d0d18;
+    font-family: Arial, Helvetica, sans-serif;
+    -webkit-tap-highlight-color: transparent;
+  }
+  /* Handy: Canvas fuellt den Bildschirm, kein Scrollen */
+  body.phone { overflow: hidden; }
+  body.phone canvas { position: absolute; touch-action: none; }
+  /* Vollbild: html und body muessen den gesamten Bereich abdecken */
+  :fullscreen { width: 100%; height: 100%; background: #0d0d18; }
+  :-webkit-full-screen { width: 100%; height: 100%; background: #0d0d18; }
+  /* Rechner: Canvas ist normaler Seiteninhalt - Browser-Zoom und Scrollen gehen */
+  body.desktop { display: flex; justify-content: center; padding: 12px 0; }
+  body.desktop canvas {
+    display: block;
+    border: 1px solid #2a2a3e;
+    border-radius: 6px;
+    touch-action: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+// ===============================================================
+//  DivisionBall  -  1:1-Portierung von GameView.kt
+//  Zeilenangaben in den Kommentaren verweisen auf das Original.
+// ===============================================================
+
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+
+// ---------------------------------------------------------------
+//  ZEITBASIS
+//  Das Spiel liest die Zeit ueber now(). Im normalen Spiel ist das
+//  einfach now(). Im Anleitungsfilm laeuft eine eigene Uhr
+//  fuenfmal so schnell - dadurch spielt sich eine 35-Sekunden-Runde
+//  in 7 Sekunden ab, ohne dass die Spiellogik etwas davon merkt.
+// ---------------------------------------------------------------
+const DEMO_SPEED = 5;
+let demoActive = false;
+let demoRealStart = 0;      // echte Zeit beim Filmstart
+let demoClockStart = 0;     // virtuelle Zeit beim Filmstart
+
+function now() {
+  if (!demoActive) return Date.now();
+  return demoClockStart + (Date.now() - demoRealStart) * DEMO_SPEED;
+}
+
+// Verzoegerungen sind in SPIELZEIT gedacht. Im Film muessen sie
+// entsprechend kuerzer sein, sonst haengt das Ergebnis hinterher.
+function later(fn, ms) {
+  return setTimeout(fn, demoActive ? ms / DEMO_SPEED : ms);
+}
+
+const S = { IDLE:0, CHARGING:1, FLYING:2, ANIMATING:3, EVALUATING:4,
+            RESULT:5, CONFIRM_DIFFICULTY:6, BONUS:7, HIGHSCORE:8 };
+
+let gameState = S.IDLE;
+let score = 100n, round = 1, displayScore = 100n, displayRound = 1;
+let flightDuration = 2000, difficulty = 0, pendingDifficulty = 0, pendingScoreAdjustment = 0n;
+
+let bonusSecondsLeft = 0, bonusPointsAdded = 0n, bonusTotal = 0n, bonusTimer = null;
+
+let W = 0, H = 0, isInitialized = false;
+let fontScale = 1;
+function fs(size) { return Math.round(size * fontScale); }
+let springX = 0, springY = 0, bowlX = 0, bowlY = 0;
+let springCompression = 0, chargingStartTime = 0;
+const maxChargeTime = 2000;
+
+let activeDornCount = 1, dornDividers = [], dornPositions = [];
+let dividerRattleTimer = 0;
+const dividerRattleInterval = 100;
+let availableDividers = [];
+let tappedDornIndex = -1, tappedDornShowUntil = 0;
+
+let ballX = 0, ballY = 0;
+const ballRadius = 28;
+let ballFlightStartTime = 0, ballFlightProgress = 0;
+
+let activePieces = [], bowlPieces = [];
+let currentDornIndex = 0, animationStartTime = 0, wasSkipped = false;
+
+let wasSuccess = false, isResetting = false;
+let failCorrectAnswer = 0n, failScoreBefore = 0n, failCollected = [];
+
+let proCountdownActive = false, proCountdownStartTime = 0;
+const proCountdownDuration = 1000;
+
+let segment1EndY = 0, segment2EndX = 0;
+let bankLeft = 0, bankTop = 0, bankRight = 0, bankBottom = 0;
+
+let numberPool = [], collectedNumbers = [];
+let currentMultiplier = 1, multiplierButtons = [];
+
+let sliderX = 0, sliderY = 0, sliderWidth = 0, sliderValue = 120;
+let isDraggingSlider = false;
+let diffSliderX = 0, diffSliderY = 0, diffSliderWidth = 0, isDraggingDiffSlider = false;
+
+let highscores = [], highscoreSort = 0;
+
+const DIFF_LABELS = ['Easy','Medium','Hard','Pro','Legend'];
+
+// BigInt: Kotlin nutzt Long. Ohne BigInt waere ab Runde 47 Schluss.
+const B = v => BigInt(v);
+function bMin(a,b){ return a < b ? a : b; }
+function bMax(a,b){ return a > b ? a : b; }
+
+// ===============================================================
+//  MATHEMATIK  (Z. 432-557)
+// ===============================================================
+
+function findCleanDivisors(number, maxDivisor) {          // Z.440
+  const out = [];
+  for (let d = 2; d <= maxDivisor; d++) if (number % B(d) === 0n) out.push(d);
+  return out;
+}
+
+function pick(a){ return a[Math.floor(Math.random()*a.length)]; }
+function shuffle(a){
+  const r = a.slice();
+  for (let i = r.length-1; i > 0; i--) {
+    const j = Math.floor(Math.random()*(i+1));
+    const t = r[i]; r[i] = r[j]; r[j] = t;
+  }
+  return r;
+}
+function prodB(a){ return a.reduce((x,y) => x * B(y), 1n); }
+
+function updateAvailableDividers() {                      // Z.432
+  availableDividers = findCleanDivisors(score, 9);
+  if (availableDividers.length === 0) availableDividers = [2];
+}
+
+function primeFactors(n) {                                // Z.468
+  const factors = [];
+  let remaining = n, f = 2n;
+  while (f*f <= remaining && f <= 9999n) {
+    while (remaining % f === 0n) { factors.push(Number(f)); remaining /= f; }
+    f++;
+  }
+  if (remaining > 1n && remaining <= 9n) factors.push(Number(remaining));
+  return factors;
+}
+
+function groupFactors(factors, slots) {                   // Z.480
+  if (factors.length === 0) return new Array(slots).fill(1);
+  const pool = shuffle(factors);
+  const result = [];
+  if (pool.length >= slots) {
+    while (pool.length > 0 && result.length < slots) {
+      let group = pool.shift();
+      while (pool.length > 0 && result.length + pool.length + 1 > slots) {
+        const f = pool[0];
+        if (group * f <= 9) { group *= f; pool.shift(); } else break;
+      }
+      result.push(group);
+    }
+  } else {
+    for (const f of pool) result.push(f);
+  }
+  while (result.length < slots) result.push(1);
+  return shuffle(result);
+}
+
+function findValidDividerCombination(sc, dornCount) {     // Z.450
+  const useLegend = (difficulty === 4);
+
+  if (!useLegend) {
+    if (dornCount === 1) {
+      const av = findCleanDivisors(sc, 9);
+      return av.length ? [pick(av)] : [2];
+    }
+    for (let t = 0; t < 300; t++) {
+      const combo = [];
+      for (let i = 0; i < dornCount; i++) combo.push(2 + Math.floor(Math.random()*8));
+      if (sc % prodB(combo) === 0n) return combo;
+    }
+    return new Array(dornCount).fill(2);                  // Z.463
+  }
+
+  function alleDivisorenAnsatz(sc, slots) {               // Z.501
+    const divs = findCleanDivisors(sc, 9);
+    if (divs.length === 0) return null;
+    for (let t = 0; t < 100; t++) {
+      const combo = [];
+      let remaining = sc;
+      for (let i = 0; i < slots; i++) {
+        const av = findCleanDivisors(remaining, 9);
+        if (av.length === 0) combo.push(1);
+        else { const c = pick(av); combo.push(c); remaining /= B(c); }
+      }
+      if (sc % prodB(combo) === 0n) return shuffle(combo);
+    }
+    return null;
+  }
+
+  function primfaktorAnsatz(sc, slots) {                  // Z.518
+    for (let t = 0; t < 50; t++) {
+      const combo = groupFactors(primeFactors(sc), slots);
+      if (sc % prodB(combo) === 0n) return combo;
+    }
+    return null;
+  }
+
+  const result = Math.random() < 0.5
+    ? (alleDivisorenAnsatz(sc, dornCount) || primfaktorAnsatz(sc, dornCount))
+    : (primfaktorAnsatz(sc, dornCount) || alleDivisorenAnsatz(sc, dornCount));
+  if (result) return result;
+
+  const combo = [];                                       // Z.534 Greedy
+  let remaining = sc;
+  for (let i = 0; i < dornCount; i++) {
+    const divs = findCleanDivisors(remaining, 9);
+    if (divs.length) { const c = pick(divs); combo.push(c); remaining /= B(c); }
+    else combo.push(1);
+  }
+  if (sc % prodB(combo) === 0n) return shuffle(combo);
+
+  const divs = findCleanDivisors(sc, 9);                  // Z.549
+  if (divs.length) {
+    const r = new Array(dornCount).fill(1);
+    r[0] = pick(divs);
+    return shuffle(r);
+  }
+  return new Array(dornCount).fill(1);
+}
+
+// ===============================================================
+//  LAYOUT  (Z. 266-430)
+// ===============================================================
+
+// Das Original laeuft auf einem Handy mit rund 1080x2400 Pixeln.
+// Alle Positionen sind prozentual (bankTop = H*0.45), ABER Roehre (80px),
+// Dornabstand (110px), Sammelfach (180..380) und alle Schriftgroessen sind
+// feste Pixelwerte - abgestimmt auf diese Aufloesung.
+// Deshalb wird intern IMMER in 1080x2400 gezeichnet und das Ergebnis
+// auf das Fenster skaliert. So bleibt jedes Verhaeltnis wie im Original.
+// Das Original-Handy hat 1080x2400. Auf einem Querformat-Bildschirm ist das
+// unnoetig lang: 44% der Hoehe sind Leerraum (zwischen Sammelfach und Bahn,
+// zwischen Schale und unterem Rand). BASE_H gestaucht - alle prozentualen
+// Positionen ruecken mit, die festen Pixelmasse bleiben. Auf Kollisionen
+// geprueft: bis hinunter zu 1500 ueberlappt nichts.
+const BASE_W = 900, BASE_H = 1560;
+
+// Handy oder Rechner? Ein schmales Hochformat-Fenster ist ein Handy.
+function isPhone() {
+  const w = window.innerWidth, h = window.innerHeight;
+  return (h > w) && (w <= 820);
+}
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  const winW = window.innerWidth;
+  const winH = window.innerHeight;
+  const phone = isPhone();
+
+  document.body.className = phone ? 'phone' : 'desktop';
+
+  let cssW, cssH;
+  if (phone) {
+    const scale = Math.min(winW / BASE_W, winH / BASE_H);
+    cssW = Math.floor(BASE_W * scale);
+    cssH = Math.floor(BASE_H * scale);
+  } else {
+    cssH = 640;
+    cssW = Math.floor(cssH * BASE_W / BASE_H);
+  }
+
+  W = BASE_W; H = BASE_H;
+
+  if (phone) {
+    const scale = Math.min(winW / BASE_W, winH / BASE_H);
+    fontScale = Math.min(2.0, 1 / scale * 0.45);
+  } else {
+    fontScale = 1;
+  }
+
+  cv.width = Math.floor(cssW * dpr);
+  cv.height = Math.floor(cssH * dpr);
+  cv.style.width = cssW + 'px';
+  cv.style.height = cssH + 'px';
+
+  if (phone) {
+    cv.style.left = Math.floor((winW - cssW) / 2) + 'px';
+    cv.style.top  = Math.floor((winH - cssH) / 2) + 'px';
+  } else {
+    cv.style.left = '';
+    cv.style.top = '';
+  }
+
+  const sx = (cssW * dpr) / BASE_W;
+  ctx.setTransform(sx, 0, 0, sx, 0, 0);
+
+  isInitialized = false;
+  initializePositions();
+}
+
+function initializePositions() {                          // Z.266
+  if (isInitialized || W <= 0 || H <= 0) return;
+  bankLeft = W*0.15; bankRight = W*0.85;
+  bankTop = H*0.45;  bankBottom = H*0.75;
+  springX = W*0.12;  springY = H*0.88;
+  bowlX = W*0.88;    bowlY = H*0.88;
+  segment1EndY = 380 + (bankTop - 380)/2;
+  segment2EndX = W*0.88;
+  ballX = springX; ballY = getBallOnSpringY();
+  sliderX = 120; sliderY = 60; sliderWidth = 300;
+  diffSliderX = 120; diffSliderY = 120; diffSliderWidth = 300;
+  createMultiplierButtons();
+  isInitialized = true;
+  updateActiveDornCount();
+  updateAvailableDividers();
+  positionDorns();
+}
+
+function getBallOnSpringY() {                             // Z.2539
+  return springY - 50 - 90 - ballRadius - 5;
+}
+
+function createMultiplierButtons() {                      // Z.313
+  multiplierButtons = [];
+  const topY = bankTop + 25, bw = 80, bh = 44;
+  const rows = [
+    { v:[5,10,20,50,100,200], l:['\u00D75','\u00D710','\u00D720','\u00D750','\u00D7100','\u00D7200'], dy:0 },
+    { v:[500,1000,2000,5000,10000,20000], l:['\u00D7500','\u00D71k','\u00D72k','\u00D75k','\u00D710k','\u00D720k'], dy:48 },
+    { v:[50000,100000,200000,500000,1000000,5000000], l:['\u00D750k','\u00D7100k','\u00D7200k','\u00D7500k','\u00D71M','\u00D75M'], dy:96 }
+  ];
+  const spacing = (bankRight - bankLeft - 80) / 6;
+  for (const r of rows)
+    for (let i = 0; i < r.v.length; i++)
+      multiplierButtons.push({ label:r.l[i], x:bankLeft+40+i*spacing, y:topY+r.dy,
+                               width:bw, height:bh, value:r.v[i] });
+}
+
+function updateActiveDornCount() {                        // Z.348
+  if (difficulty === 4)
+    activeDornCount = round<=3?1:round<=6?2:round<=10?3:round<=15?4:round<=20?5:
+                      round<=25?6:round<=30?7:round<=35?8:round<=40?9:10;
+  else if (difficulty === 3)
+    activeDornCount = round<=5?1:round<=10?2:round<=17?3:round<=23?4:round<=30?5:
+                      round<=34?6:round<=40?7:round<=44?8:round<=49?9:10;
+  else
+    activeDornCount = round<=5?1:round<=10?2:round<=20?3:round<=30?4:4+Math.floor((round-30)/10);
+}
+
+function positionDorns() {                                // Z.386
+  dornPositions = [];
+  const dornSpacing = 110;
+  const rightX = W*0.88;
+  const lowestDornY = bowlY - 150;
+  for (let i = 0; i < Math.min(activeDornCount, 4); i++)
+    dornPositions.push([rightX, lowestDornY - i*dornSpacing]);
+  if (activeDornCount >= 5) dornPositions.push([rightX, lowestDornY - 4*dornSpacing]);
+  if (activeDornCount >= 6) dornPositions.push([rightX, segment1EndY]);
+  if (activeDornCount >= 7) {
+    const slots = Math.min(activeDornCount - 6, 3);
+    for (let i = 0; i < slots; i++)
+      dornPositions.push([segment2EndX - dornSpacing*(i+1), segment1EndY]);
+  }
+  if (activeDornCount >= 10) {
+    const slots = activeDornCount - 9;
+    const topY = segment1EndY + 60, bottomY = springY - 200;
+    const avail = bottomY - topY;
+    for (let i = 0; i < slots; i++)
+      dornPositions.push([springX, topY + (avail/(slots+1))*(i+1)]);
+  }
+}
+
+// ===============================================================
+//  ZEICHNEN
+// ===============================================================
+
+function rr(x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+}
+
+function pathEndY() {
+  const maxSenkrecht = Math.min(activeDornCount, 5);       // Z.714
+  return maxSenkrecht > 0
+    ? (bowlY - 150) - ((maxSenkrecht - 1) * 110) - 60
+    : bowlY - 70;
+}
+
+function drawTrack() {                                    // Z.692
+  const p = new Path2D();
+  p.moveTo(springX, springY - 50);
+  p.lineTo(springX, segment1EndY);
+  p.arc(springX + 30, segment1EndY, 30, Math.PI, Math.PI*1.5);
+  p.lineTo(segment2EndX - 30, segment1EndY - 30);
+  p.arc(segment2EndX - 30, segment1EndY, 30, Math.PI*1.5, Math.PI*2);
+  p.lineTo(segment2EndX, pathEndY());
+  ctx.lineCap='round'; ctx.lineJoin='round';
+  ctx.strokeStyle='#2a2a3e'; ctx.lineWidth=24; ctx.stroke(p);
+  ctx.strokeStyle='#3a3a4e'; ctx.lineWidth=18; ctx.stroke(p);
+  ctx.strokeStyle='#4a4a5e'; ctx.lineWidth=8;  ctx.stroke(p);
+}
+
+function drawTube() {                                     // Z.729
+  const tubeWidth = 80;
+  const p = new Path2D();
+  p.moveTo(springX, springY);
+  p.lineTo(springX, segment1EndY + 60);
+  p.arc(springX + 30, segment1EndY + 30, 30, Math.PI, Math.PI*1.5);
+  p.lineTo(segment2EndX - 30, segment1EndY);
+  p.arc(segment2EndX - 30, segment1EndY + 30, 30, Math.PI*1.5, Math.PI*2);
+  p.lineTo(segment2EndX, pathEndY());
+
+  ctx.lineCap='round'; ctx.lineJoin='round';
+  ctx.strokeStyle='#222222'; ctx.lineWidth=tubeWidth+10; ctx.stroke(p);
+  ctx.strokeStyle='#444444'; ctx.lineWidth=tubeWidth;    ctx.stroke(p);
+
+  const hp = new Path2D();                                // Z.793
+  hp.moveTo(springX-15, springY);
+  hp.lineTo(springX-15, segment1EndY+60);
+  hp.arc(springX+15, segment1EndY+30, 30, Math.PI, Math.PI*1.5);
+  hp.lineTo(segment2EndX-30, segment1EndY-15);
+  ctx.strokeStyle='#666666'; ctx.lineWidth=tubeWidth*0.4; ctx.stroke(hp);
+}
+
+function ballGrad(x, y, r) {                              // Z.806 - ROT
+  const gx = x - r*0.3, gy = y - r*0.3;
+  const g = ctx.createRadialGradient(gx, gy, 0, gx, gy, r*1.5);
+  g.addColorStop(0, '#FF6B6B'); g.addColorStop(0.6, '#EE5555'); g.addColorStop(1, '#CC3333');
+  return g;
+}
+
+function drawBall(x, y) {                                 // Z.805
+  ctx.fillStyle = ballGrad(x, y, ballRadius);
+  ctx.beginPath(); ctx.arc(x, y, ballRadius, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.706)';
+  ctx.beginPath(); ctx.arc(x - ballRadius*0.4, y - ballRadius*0.4, ballRadius*0.3, 0, Math.PI*2); ctx.fill();
+  ctx.font = 'bold ' + fs(26) + 'px Arial'; ctx.textAlign='center'; ctx.textBaseline='alphabetic';
+  ctx.shadowColor='#000'; ctx.shadowBlur=3; ctx.shadowOffsetY=2;
+  ctx.fillStyle='#fff';
+  ctx.fillText(String(displayScore), x, y + 9);           // Z.826
+  ctx.shadowColor='transparent'; ctx.shadowBlur=0; ctx.shadowOffsetY=0;
+}
+
+function drawPiece(p) {                                   // Z.831
+  ctx.fillStyle = ballGrad(p.x, p.y, p.size);
+  ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.706)';
+  ctx.beginPath(); ctx.arc(p.x - p.size*0.4, p.y - p.size*0.4, p.size*0.3, 0, Math.PI*2); ctx.fill();
+}
+
+function drawBallPieces() {
+  for (const p of activePieces) drawPiece(p);
+  for (const p of bowlPieces) drawPiece(p);
+}
+
+function drawSpring() {                                   // Z.884
+  const baseRadius = 50, springHeight = 90, springWidth = 35;
+  const stretchOffset = springHeight * springCompression * 0.8;
+
+  const bg = ctx.createRadialGradient(springX, springY, 0, springX, springY, baseRadius);
+  bg.addColorStop(0,'#777777'); bg.addColorStop(1,'#555555');
+  ctx.fillStyle = bg;
+  ctx.beginPath(); ctx.arc(springX, springY, baseRadius, 0, Math.PI*2); ctx.fill();
+
+  const coils = 8;
+  const topY = springY - baseRadius - springHeight;
+  const actualHeight = springHeight + stretchOffset;
+  const coilHeight = actualHeight / coils;
+
+  const drawCoils = (color, width, ox, oy) => {
+    ctx.strokeStyle = color; ctx.lineWidth = width; ctx.lineCap='round';
+    for (let i = 0; i < coils; i++) {
+      const y = topY + i*coilHeight, nextY = topY + (i+1)*coilHeight;
+      ctx.beginPath();
+      ctx.moveTo(springX - springWidth + ox, y + oy);
+      ctx.bezierCurveTo(
+        springX - springWidth*0.5 + ox, y + coilHeight*0.3 + oy,
+        springX + springWidth*0.5 + ox, nextY - coilHeight*0.3 + oy,
+        springX + springWidth + ox, nextY + oy);
+      ctx.stroke();
+    }
+  };
+  drawCoils('#333333', 12, 2, 2);
+  drawCoils('#888888', 10, 0, 0);
+  drawCoils('#AAAAAA', 6, -3, -2);
+
+  if (gameState === S.CHARGING) {                         // Z.981
+    ctx.fillStyle = '#FFD700';
+    ctx.beginPath(); ctx.arc(springX, springY, 12, 0, Math.PI*2); ctx.fill();
+  }
+}
+
+function drawDorn(x, y, divider) {                        // Z.990
+  const radius = 45;
+  const g = ctx.createRadialGradient(x, y, 0, x, y, radius);
+  g.addColorStop(0,'#444444'); g.addColorStop(1,'#222222');
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI*2); ctx.fill();
+
+  if (divider === 1) {                                    // Z.993
+    ctx.strokeStyle = '#FFD700'; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.arc(x, y, radius*0.75, 0, Math.PI*2); ctx.stroke();
+    return;
+  }
+  ctx.strokeStyle = '#FFD700'; ctx.lineWidth = 4;
+  for (let i = 0; i < divider; i++) {                     // Z.1026
+    const angle = (360/divider)*i - 90;
+    const rad = angle * Math.PI/180;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + radius*0.75*Math.cos(rad), y + radius*0.75*Math.sin(rad));
+    ctx.stroke();
+  }
+}
+
+function drawBowl() {                                     // Z.1037
+  const bowlWidth = 140, bowlDepth = 60, rimWidth = 10;
+  const g = ctx.createLinearGradient(bowlX - bowlWidth/2, bowlY, bowlX + bowlWidth/2, bowlY + bowlDepth);
+  g.addColorStop(0,'#D2691E'); g.addColorStop(0.5,'#8B4513'); g.addColorStop(1,'#654321');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.moveTo(bowlX - bowlWidth/2, bowlY - 10);
+  ctx.quadraticCurveTo(bowlX - bowlWidth/2 + 15, bowlY + bowlDepth - 15, bowlX, bowlY + bowlDepth);
+  ctx.quadraticCurveTo(bowlX + bowlWidth/2 - 15, bowlY + bowlDepth - 15, bowlX + bowlWidth/2, bowlY - 10);
+  ctx.fill();
+
+  ctx.fillStyle = '#CD853F';                              // Z.1069 Rand
+  ctx.beginPath();
+  ctx.ellipse(bowlX, (bowlY-20 + bowlY+5)/2, bowlWidth/2 + rimWidth, 12.5, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  ctx.fillStyle = '#8B4513';                              // Z.1083 Innenschatten
+  ctx.beginPath();
+  ctx.ellipse(bowlX, (bowlY-15 + bowlY)/2, bowlWidth/2 - 5, 7.5, 0, 0, Math.PI*2);
+  ctx.fill();
+}
+
+function drawNumberBank() {                               // Z.1097
+  const g = ctx.createLinearGradient(bankLeft, bankTop, bankRight, bankBottom);
+  g.addColorStop(0,'#16213e'); g.addColorStop(1,'#0f3460');
+  ctx.fillStyle = g;
+  rr(bankLeft, bankTop, bankRight-bankLeft, bankBottom-bankTop, 20); ctx.fill();
+  ctx.strokeStyle = '#0f3460'; ctx.lineWidth = 4;
+  rr(bankLeft, bankTop, bankRight-bankLeft, bankBottom-bankTop, 20); ctx.stroke();
+
+  ctx.fillStyle = '#FFD700'; ctx.font = 'bold ' + fs(32) + 'px Arial';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText('NUMBER BANK', (bankLeft+bankRight)/2, bankTop - 15);
+
+  for (const btn of multiplierButtons) {                  // Z.1118
+    const isActive = (btn.value === currentMultiplier && currentMultiplier !== 1);
+    ctx.strokeStyle = isActive ? '#FFD700' : '#666666';
+    ctx.lineWidth = 2;
+    rr(btn.x, btn.y - btn.height/2, btn.width, btn.height, 4); ctx.stroke();
+    ctx.font = 'bold ' + fs(20) + 'px Arial'; ctx.fillStyle = '#FFD700';
+    ctx.fillText(btn.label, btn.x + btn.width/2, btn.y + 6);
+  }
+}
+
+function drawCollectionSlot() {                           // Z.1141
+  const slotLeft = 30, slotTop = 180, slotRight = W - 30, slotBottom = 380;
+  ctx.fillStyle = '#1a1a2e';
+  rr(slotLeft, slotTop, slotRight-slotLeft, slotBottom-slotTop, 12); ctx.fill();
+  ctx.strokeStyle = '#0f3460'; ctx.lineWidth = 3;
+  rr(slotLeft, slotTop, slotRight-slotLeft, slotBottom-slotTop, 12); ctx.stroke();
+
+  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  ctx.font = 'bold ' + fs(24) + 'px Arial'; ctx.fillStyle = '#FFD700';
+  ctx.fillText('Collected:', slotLeft + 15, slotTop - 8);
+  ctx.textAlign = 'center';
+
+  const ballsPerRow = 6;
+  let xOffset = slotLeft + 60, row = 0;
+  for (let index = 0; index < collectedNumbers.length; index++) {
+    if (row >= 3) break;
+    if (index > 0 && index % ballsPerRow === 0) {
+      row++; xOffset = slotLeft + 60;
+      if (row >= 3) break;
+    }
+    const item = collectedNumbers[index];
+    const yOffset = slotTop + 50 + row*60;
+    const g = ctx.createRadialGradient(xOffset, yOffset, 0, xOffset, yOffset, 28);
+    g.addColorStop(0,'#4CAF50'); g.addColorStop(1,'#388E3C');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(xOffset, yOffset, 28, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = 'bold ' + fs(20) + 'px Arial'; ctx.textAlign = 'center';
+    ctx.fillText(String(item.value), xOffset, yOffset + 7);
+    if (item.multiplier > 1) {                            // Z.1193
+      ctx.textAlign = 'left'; ctx.font = 'bold ' + fs(18) + 'px Arial'; ctx.fillStyle = '#FFD700';
+      ctx.fillText('\u00D7' + item.multiplier, xOffset + 32, yOffset + 6);
+      ctx.textAlign = 'center';
+    }
+    xOffset += 100;
+  }
+}
+
+function fitFontForPool() {                               // Z.1208
+  const buttonSpacing = (bankRight - bankLeft) * 0.28;
+  let sharedFontSize = fs(36);
+  for (const btn of numberPool) {
+    const text = String(btn.value);
+    ctx.font = 'bold ' + sharedFontSize + 'px Arial';
+    while (ctx.measureText(text).width > buttonSpacing*0.95 && sharedFontSize > 10) {
+      sharedFontSize -= 2;
+      ctx.font = 'bold ' + sharedFontSize + 'px Arial';
+    }
+  }
+  return sharedFontSize;
+}
+
+function drawNumberPool() {                               // Z.1205
+  const sharedFontSize = fitFontForPool();
+  for (let i = 0; i < numberPool.length; i++) {
+    const btn = numberPool[i];
+    const g = ctx.createRadialGradient(btn.x, btn.y, 0, btn.x, btn.y, btn.radius);
+    if (btn.clicked) { g.addColorStop(0,'#4CAF50'); g.addColorStop(1,'#388E3C'); }
+    else { g.addColorStop(0,'#555555'); g.addColorStop(1,'#333333'); }
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(btn.x, btn.y, btn.radius, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = btn.clicked ? '#FFD700' : '#666666';
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(btn.x, btn.y, btn.radius, 0, Math.PI*2); ctx.stroke();
+
+    const text = String(btn.value);
+    ctx.font = 'bold ' + sharedFontSize + 'px Arial';
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+    const textY = ctx.measureText(text).width > btn.radius*2   // Z.1249
+      ? (i % 2 === 0 ? btn.y - 14 : btn.y + 34)
+      : btn.y + 12;
+    ctx.fillText(text, btn.x, textY);
+  }
+}
+
+function drawSpeedSlider() {                              // Z.1259
+  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  ctx.font = 'bold ' + fs(20) + 'px Arial'; ctx.fillStyle = '#fff';
+  let totalSecs;
+  if (gameState === S.CHARGING) {
+    const elapsed = now() - chargingStartTime;
+    const adj = Math.max(0, elapsed - 80);
+    const mult = 1 + Math.pow(Math.min(1, Math.max(0, adj/2920)), 2)*4;
+    totalSecs = Math.max(1, Math.floor(sliderValue/mult));
+  } else if (gameState === S.FLYING) {
+    if (proCountdownActive) {
+      const ce = now() - proCountdownStartTime;
+      const cr = Math.min(1, Math.max(0, ce/proCountdownDuration));
+      totalSecs = Math.max(0, Math.floor(flightDuration*(1 - cr*cr)/1000));
+    } else {
+      const elapsed = now() - ballFlightStartTime;
+      totalSecs = Math.floor(Math.max(0, flightDuration - elapsed)/1000);
+    }
+  } else if (gameState === S.ANIMATING || gameState === S.EVALUATING) totalSecs = 0;
+  else totalSecs = Math.floor(sliderValue);
+
+  const displayText = totalSecs < 60 ? totalSecs + 's'
+    : Math.floor(totalSecs/60) + 'm' + (totalSecs%60) + 's';
+  ctx.fillText('Speed: ' + displayText, sliderX + sliderWidth + 20, sliderY + 6);
+
+  ctx.strokeStyle = '#444444'; ctx.lineWidth = 8; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(sliderX, sliderY); ctx.lineTo(sliderX+sliderWidth, sliderY); ctx.stroke();
+
+  const thumbX = sliderX + ((sliderValue-1)/299)*sliderWidth;
+  ctx.fillStyle = '#222222';
+  ctx.beginPath(); ctx.arc(thumbX+2, sliderY+2, 18, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#FFD700';
+  ctx.beginPath(); ctx.arc(thumbX, sliderY, 18, 0, Math.PI*2); ctx.fill();
+  ctx.textAlign = 'center';
+}
+
+function drawDifficultySlider() {                         // Z.1311
+  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  ctx.font = 'bold ' + fs(20) + 'px Arial'; ctx.fillStyle = '#fff';
+  ctx.fillText('Difficulty: ' + DIFF_LABELS[difficulty], diffSliderX + diffSliderWidth + 20, diffSliderY + 6);
+
+  ctx.strokeStyle = '#444444'; ctx.lineWidth = 8; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(diffSliderX, diffSliderY);
+  ctx.lineTo(diffSliderX+diffSliderWidth, diffSliderY); ctx.stroke();
+
+  const thumbX = diffSliderX + (difficulty/4)*diffSliderWidth;
+  ctx.fillStyle = '#222222';
+  ctx.beginPath(); ctx.arc(thumbX+2, diffSliderY+2, 18, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#FFD700';
+  ctx.beginPath(); ctx.arc(thumbX, diffSliderY, 18, 0, Math.PI*2); ctx.fill();
+  ctx.textAlign = 'center';
+}
+
+function drawResultMessage() {                            // Z.1344
+  const success = wasSuccess;
+  const cx = W/2;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+
+  if (!success) {                                         // Z.1350
+    const buttonSpacing = numberPool.length > 1
+      ? Math.abs(numberPool[1].x - numberPool[0].x)
+      : 90;
+    for (let i = 0; i < numberPool.length; i++) {
+      const btn = numberPool[i];
+      const isCorrect = (btn.value === failCorrectAnswer);
+      const isWrong = failCollected.some(v => v === btn.value) && !isCorrect;
+      const c1 = isCorrect ? '#4CAF50' : isWrong ? '#FF5252' : '#555555';
+      const c2 = isCorrect ? '#388E3C' : isWrong ? '#C62828' : '#333333';
+      const g = ctx.createRadialGradient(btn.x, btn.y, 0, btn.x, btn.y, btn.radius);
+      g.addColorStop(0,c1); g.addColorStop(1,c2);
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(btn.x, btn.y, btn.radius, 0, Math.PI*2); ctx.fill();
+      ctx.strokeStyle = isCorrect ? '#FFD700' : isWrong ? '#FF0000' : '#666666';
+      ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(btn.x, btn.y, btn.radius, 0, Math.PI*2); ctx.stroke();
+
+      const text = String(btn.value);
+      let fontSize = fs(36);
+      ctx.font = 'bold ' + fontSize + 'px Arial';
+      while (ctx.measureText(text).width > buttonSpacing*0.95 && fontSize > 10) {
+        fontSize -= 2; ctx.font = 'bold ' + fontSize + 'px Arial';
+      }
+      ctx.fillStyle = '#fff';
+      const textY = ctx.measureText(text).width > btn.radius*2
+        ? (i % 2 === 0 ? btn.y - 14 : btn.y + 34) : btn.y + 12;
+      ctx.fillText(text, btn.x, textY);
+    }
+  }
+
+  ctx.font = 'bold ' + fs(70) + 'px Arial';                           // Z.1405
+  ctx.fillStyle = success ? '#4CAF50' : '#FF5252';
+  ctx.fillText(success ? 'SUCCESS!' : 'FAILED', cx, H/2 - 50);
+
+  ctx.font = 'bold ' + fs(50) + 'px Arial'; ctx.fillStyle = '#FFD700';
+  ctx.fillText('Score: ' + displayScore, cx, H/2 + 30);
+
+  if (!success && failCorrectAnswer > 0n) {               // Z.1414
+    const totalDivisor = prodB(dornDividers);
+    ctx.font = 'bold ' + fs(28) + 'px Arial'; ctx.fillStyle = '#AAAAAA';
+    ctx.fillText('Richtige L\u00F6sung:', cx, H/2 + 80);
+    ctx.font = 'bold ' + fs(34) + 'px Arial'; ctx.fillStyle = '#4CAF50';
+    ctx.fillText(totalDivisor + ' \u00D7 ' + failCorrectAnswer + ' = ' + failScoreBefore, cx, H/2 + 120);
+  }
+
+  ctx.font = 'bold ' + fs(32) + 'px Arial'; ctx.fillStyle = '#fff';
+  ctx.fillText('Tap to continue', cx, H - 60);
+}
+
+function drawHighscoreOverlay() {                         // Z.1492
+  ctx.fillStyle = 'rgba(0,0,30,0.863)';
+  ctx.fillRect(0,0,W,H);
+  const cx = W/2;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.font = 'bold ' + fs(42) + 'px Arial'; ctx.fillStyle = '#FFD700';
+  ctx.fillText('Bestenliste', cx, 80);
+
+  const sorted = highscores.slice().sort((a,b) => {       // Z.1502
+    if (highscoreSort === 0) return (b.score > a.score) ? 1 : (b.score < a.score) ? -1 : 0;
+    if (highscoreSort === 1) return b.round - a.round;
+    if (b.difficulty !== a.difficulty) return b.difficulty - a.difficulty;
+    if (b.score !== a.score) return (b.score > a.score) ? 1 : -1;
+    return b.round - a.round;
+  });
+
+  const btnW = 130;
+  const bx = [cx-200, cx-65, cx+70];
+  for (let i = 0; i < 3; i++) {
+    ctx.fillStyle = (highscoreSort === i) ? '#FFD700' : '#333355';
+    rr(bx[i], 100, btnW, 45, 10); ctx.fill();
+  }
+  ctx.font = 'bold ' + fs(24) + 'px Arial';
+  const labels = ['\u2193 Score','\u2193 Level','\u2193 Diff'];
+  for (let i = 0; i < 3; i++) {
+    ctx.fillStyle = (highscoreSort === i) ? '#000' : '#fff';
+    ctx.fillText(labels[i], bx[i] + btnW/2, 132);
+  }
+
+  const rowHeight = 70, startY = 175;
+  for (let i = 0; i < sorted.length; i++) {
+    const e = sorted[i];
+    const y = startY + i*rowHeight;
+    ctx.fillStyle = (i % 2 === 0) ? 'rgba(255,255,255,0.235)' : 'rgba(255,255,255,0.078)';
+    ctx.fillRect(30, y-36, W-60, 64);
+
+    ctx.font = 'bold ' + fs(24) + 'px Arial'; ctx.textAlign = 'left';
+    ctx.fillStyle = '#FFD700'; ctx.fillText((i+1) + '.', 40, y-10);
+    ctx.fillStyle = '#fff'; ctx.fillText(String(e.score), 72, y-10);
+
+    ctx.font = 'bold ' + fs(20) + 'px Arial'; ctx.fillStyle = '#AAAAAA';
+    ctx.fillText(e.date, 72, y+18);
+    const stars = '\u2605'.repeat(Math.min(4, Math.max(0, e.difficulty)) + 1);
+    ctx.fillStyle = '#FFD700'; ctx.textAlign = 'center';
+    ctx.fillText(stars, cx, y+18);
+    ctx.textAlign = 'right'; ctx.fillStyle = '#AAAAAA';
+    ctx.fillText('Lvl ' + e.round, W-40, y+18);
+    ctx.textAlign = 'center';
+  }
+
+  if (sorted.length === 0) {
+    ctx.fillStyle = '#888888'; ctx.font = 'bold ' + fs(30) + 'px Arial';
+    ctx.fillText('Noch keine Eintr\u00E4ge', cx, H/2);
+  }
+
+  ctx.fillStyle = '#B71C1C';
+  rr(cx-100, H-100, 200, 50, 15); ctx.fill();
+  ctx.font = 'bold ' + fs(32) + 'px Arial'; ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+  ctx.fillText('Schlie\u00DFen', cx, H-65);
+}
+
+function drawConfirmDifficultyDialog() {                  // Z.1572
+  ctx.fillStyle = 'rgba(0,0,0,0.706)';
+  ctx.fillRect(0,0,W,H);
+  const cx = W/2, cy = H/2;
+  ctx.fillStyle = '#1A2A4A';
+  rr(cx-280, cy-200, 560, 400, 20); ctx.fill();
+  ctx.strokeStyle = '#FFD700'; ctx.lineWidth = 3;
+  rr(cx-280, cy-200, 560, 400, 20); ctx.stroke();
+
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.font = 'bold ' + fs(36) + 'px Arial'; ctx.fillStyle = '#FFD700';
+  ctx.fillText('Schwierigkeitsgrad \u00E4ndern?', cx, cy-140);
+
+  ctx.font = 'bold ' + fs(28) + 'px Arial'; ctx.fillStyle = '#fff';
+  ctx.fillText('Neues Level: ' + DIFF_LABELS[pendingDifficulty], cx, cy-90);
+  if (pendingScoreAdjustment !== score) {                 // Z.1604
+    ctx.fillStyle = '#FF9900';
+    ctx.fillText('Score wird angepasst:', cx, cy-40);
+    ctx.fillText(score + '  \u2192  ' + pendingScoreAdjustment, cx, cy+10);
+  } else {
+    ctx.fillStyle = '#4CAF50';
+    ctx.fillText('Score bleibt unver\u00E4ndert', cx, cy-20);
+  }
+
+  ctx.fillStyle = '#2E7D32';
+  rr(cx-220, cy+60, 200, 70, 15); ctx.fill();
+  ctx.font = 'bold ' + fs(34) + 'px Arial'; ctx.fillStyle = '#fff';
+  ctx.fillText('Ja', cx-120, cy+105);
+
+  ctx.fillStyle = '#B71C1C';
+  rr(cx+20, cy+60, 200, 70, 15); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.fillText('Nein', cx+120, cy+105);
+}
+
+function drawBonusScreen() {                              // Z.2470
+  ctx.fillStyle = 'rgba(0,0,0,0.8)';
+  ctx.fillRect(0,0,W,H);
+  const cx = W/2, cy = H/2;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.font = 'bold ' + fs(60) + 'px Arial'; ctx.fillStyle = '#4CAF50';
+  ctx.fillText('SUCCESS!', cx, cy-160);
+  ctx.font = 'bold ' + fs(34) + 'px Arial'; ctx.fillStyle = '#fff';
+  const secDisplay = bonusSecondsLeft >= 60
+    ? Math.floor(bonusSecondsLeft/60) + 'm ' + (bonusSecondsLeft%60) + 's \u00FCbrig'
+    : bonusSecondsLeft + 's \u00FCbrig';
+  ctx.fillText(secDisplay, cx, cy-90);
+  ctx.font = 'bold ' + fs(52) + 'px Arial'; ctx.fillStyle = '#FFD700';
+  ctx.fillText('+' + bonusPointsAdded, cx, cy+20);
+  ctx.font = 'bold ' + fs(36) + 'px Arial'; ctx.fillStyle = '#fff';
+  ctx.fillText('Score: ' + displayScore, cx, cy+90);
+  ctx.font = 'bold ' + fs(24) + 'px Arial'; ctx.fillStyle = '#AAAAAA';
+  ctx.fillText('Tippen zum \u00DCberspringen', cx, H-60);
+}
+
+function onDraw() {                                       // Z.560
+  initializePositions();
+  if (gameState === S.ANIMATING) updateAnimation();
+
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(0,0,W,H);
+
+  drawTrack();
+  if (gameState !== S.RESULT) drawNumberBank();           // Z.577
+  drawCollectionSlot();
+
+  ctx.textAlign = 'right'; ctx.textBaseline = 'alphabetic';   // Z.585
+  ctx.font = 'bold ' + fs(45) + 'px Arial'; ctx.fillStyle = '#FFD700';
+  ctx.fillText('Score: ' + displayScore, W - 30, H - 70);
+  ctx.font = 'bold ' + fs(32) + 'px Arial';
+  ctx.fillText('Round: ' + displayRound, W - 30, H - 30);
+  ctx.textAlign = 'center';
+
+  drawSpeedSlider();
+  drawDifficultySlider();
+  drawTube();
+  drawSpring();
+
+  const tNow = now();
+  for (let i = 0; i < activeDornCount; i++) {             // Z.606
+    if (i < dornPositions.length && i < dornDividers.length) {
+      const x = dornPositions[i][0], y = dornPositions[i][1];
+      drawDorn(x, y, dornDividers[i]);
+      if (i === tappedDornIndex && tNow < tappedDornShowUntil) {   // Z.611
+        ctx.font = 'bold ' + fs(38) + 'px Arial'; ctx.textAlign = 'center';
+        ctx.shadowColor = '#000'; ctx.shadowBlur = 4;
+        ctx.fillStyle = '#fff';
+        ctx.fillText(String(dornDividers[i]), x, y + 14);
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+      }
+    }
+  }
+
+  drawBowl();
+
+  if (gameState === S.ANIMATING || gameState === S.EVALUATING ||
+      (gameState === S.RESULT && bowlPieces.length)) drawBallPieces();   // Z.629
+
+  if ((gameState === S.IDLE || gameState === S.CHARGING || gameState === S.FLYING)
+      && bowlPieces.length) for (const p of bowlPieces) drawPiece(p);    // Z.634
+
+  if (gameState !== S.RESULT && gameState !== S.ANIMATING) drawBall(ballX, ballY);  // Z.662
+
+  if (gameState === S.FLYING || gameState === S.EVALUATING || gameState === S.ANIMATING)
+    drawNumberPool();                                    // Z.667
+
+  if (gameState === S.RESULT) drawResultMessage();
+  if (gameState === S.CONFIRM_DIFFICULTY) drawConfirmDifficultyDialog();
+  if (gameState === S.HIGHSCORE) drawHighscoreOverlay();
+  if (gameState === S.BONUS) drawBonusScreen();
+
+  drawDemoButton();
+  drawDemoPointer();
+}
+
+// ===============================================================
+//  ZAHLENPOOL  (Z. 1626)
+// ===============================================================
+
+function generateNumberPool() {
+  numberPool = [];
+  const totalDivisor = prodB(dornDividers);
+  if (score % totalDivisor !== 0n) return;                // Z.1632
+
+  const correctValue = score / totalDivisor;
+  const allValues = [correctValue];
+  const addVal = v => { if (!allValues.some(x => x === v)) allValues.push(v); };
+
+  if (difficulty === 1) {                                 // Z.1643
+    for (const div of findCleanDivisors(score, 9).slice(0,3)) addVal(score / B(div));
+  } else if (difficulty === 2 || difficulty === 3 || difficulty === 4) {   // Z.1649
+    for (const div of findCleanDivisors(score, 9)) addVal(score / B(div));
+    if (correctValue > 15n) {
+      const offsets = shuffle([3,5,7,11,13,17,19,23]);
+      const signs = shuffle([1n,1n,-1n,-1n,1n,-1n]);
+      for (let i = 0; i <= 1; i++) {
+        const pct = B(offsets[i]);
+        let delta = (correctValue * pct) / 100n;
+        if (delta < 1n) delta = 1n;
+        const cand = correctValue + signs[i]*delta;
+        if (cand > 0n && cand !== correctValue) addVal(cand);
+      }
+    }
+  }
+
+  const centerX = (bankLeft + bankRight)/2;
+  const centerY = bankTop + 320;
+  const spacingX = (bankRight - bankLeft)*0.28;
+  const spacingY = 110;
+
+  const distractors = shuffle(allValues.filter(v => v > 0n && v !== correctValue)).slice(0,5);
+  const values = shuffle([correctValue].concat(distractors));
+  let index = 0;
+  for (let row = 0; row < 2; row++)
+    for (let col = 0; col < 3; col++)
+      if (index < values.length) {
+        numberPool.push({ value: values[index], x: centerX + (col-1)*spacingX,
+                          y: centerY + (row-0.5)*spacingY, radius: 45, clicked: false });
+        index++;
+      }
+}
+
+// ===============================================================
+//  ABLAUF
+// ===============================================================
+
+function startCharging() {                                // Z.2029
+  gameState = S.CHARGING;
+  chargingStartTime = now();
+  dividerRattleTimer = chargingStartTime;
+  springCompression = 0;
+  collectedNumbers = [];
+  wasSkipped = false;
+  dornDividers = findValidDividerCombination(score, activeDornCount);
+}
+
+function releaseBall() {                                  // Z.2066
+  gameState = S.FLYING;
+  displayScore = score;
+  displayRound = round;
+  const chargeElapsed = now() - chargingStartTime;
+  const adjustedElapsed = Math.max(0, chargeElapsed - 80);
+  const chargeRatio = Math.min(1, Math.max(0, adjustedElapsed/2920));
+  const speedMultiplier = 1 + Math.pow(chargeRatio, 2)*4;
+  const baseDuration = sliderValue*1000;
+  flightDuration = Math.max(1000, Math.floor(baseDuration/speedMultiplier));
+  ballFlightStartTime = now();
+  ballFlightProgress = 0;
+  springCompression = 0;
+  proCountdownActive = false;
+  generateNumberPool();
+}
+
+function updateBallPosition(progress) {                   // Z.2136
+  const seg1 = 0.35, seg2 = 0.35;
+  const endY = bowlY - 70, startY = getBallOnSpringY();
+  if (progress < seg1) {
+    const p = progress/seg1;
+    ballX = springX; ballY = startY - (startY - segment1EndY)*p;
+  } else if (progress < seg1 + seg2) {
+    const p = (progress - seg1)/seg2;
+    ballX = springX + (segment2EndX - springX)*p; ballY = segment1EndY;
+  } else {
+    const p = (progress - seg1 - seg2)/(1 - seg1 - seg2);
+    ballX = segment2EndX; ballY = segment1EndY + (endY - segment1EndY)*p;
+  }
+}
+
+function collectNumber(btn) {                             // Z.2163
+  if (gameState === S.FLYING || gameState === S.ANIMATING) {
+    btn.clicked = true;
+    collectedNumbers.push({ value: btn.value, multiplier: currentMultiplier });
+  }
+}
+
+function onImpact() {                                     // Z.2172
+  gameState = S.ANIMATING;
+  currentDornIndex = 0;
+  animationStartTime = now();
+  activePieces = [];
+  if (dornPositions.length) {
+    const x = dornPositions[0][0], y = dornPositions[0][1];
+    activePieces.push({ x: x, y: y - 60, vx: 0, vy: 0, size: 20, lastDornHit: -1 });
+  }
+}
+
+function updateAnimation() {                              // Z.2188
+  if (gameState !== S.ANIMATING) return;
+  const baseDeltaTime = 16/1000;
+  const deltaTime = wasSkipped ? baseDeltaTime*5 : baseDeltaTime;
+  const gravity = 800;
+
+  for (const p of activePieces) {
+    p.vy += gravity*deltaTime;
+    p.x += p.vx*deltaTime;
+    p.y += p.vy*deltaTime;
+  }
+
+  for (let dornIndex = 0; dornIndex < dornPositions.length; dornIndex++) {
+    if (dornIndex >= dornDividers.length) continue;
+    const dornX = dornPositions[dornIndex][0], dornY = dornPositions[dornIndex][1];
+    const divider = dornDividers[dornIndex];
+    const toSplit = [];
+    for (const p of activePieces) {
+      if (p.lastDornHit >= dornIndex) continue;
+      const dx = p.x - dornX, dy = p.y - dornY;
+      if (Math.sqrt(dx*dx + dy*dy) < 50) toSplit.push(p);
+    }
+    if (toSplit.length) {
+      activePieces = activePieces.filter(p => toSplit.indexOf(p) === -1);
+      for (const p of toSplit)
+        for (let i = 0; i < divider; i++) {
+          const angle = (360/divider)*i;
+          const rad = angle*Math.PI/180;
+          activePieces.push({ x: dornX, y: dornY,
+            vx: 100*Math.cos(rad), vy: 100*Math.sin(rad) + 50,
+            size: p.size*0.7, lastDornHit: dornIndex });
+        }
+    }
+  }
+
+  const inBowl = [];
+  for (const p of activePieces)
+    if (p.y >= bowlY - 30) {
+      p.x = bowlX + (Math.random()*60 - 30);
+      p.y = bowlY - 10 + (Math.random()*20 - 10);
+      p.vx = 0; p.vy = 0;
+      inBowl.push(p);
+    }
+  activePieces = activePieces.filter(p => inBowl.indexOf(p) === -1);
+  for (const p of inBowl) if (bowlPieces.length < 50) bowlPieces.push(p);
+
+  if (activePieces.length === 0 && inBowl.length > 0) {
+    gameState = S.EVALUATING;
+    ballX = bowlX; ballY = bowlY - 70;
+    wasSkipped = false;
+    later(evaluateResult, 800);
+  }
+}
+
+// ===============================================================
+//  WERTUNG  (Z. 2286-2433)
+// ===============================================================
+
+function calculateTieredBonus(seconds) {                  // Z.2387
+  if (seconds <= 0) return 0n;
+  let remaining = B(seconds), bonus = 0n;
+  let tier = ((B(seconds) - 1n)/10n) + 1n;
+  while (remaining > 0n) {
+    const inThisTier = bMin(remaining, 10n);
+    bonus += inThisTier*tier;
+    remaining -= inThisTier;
+    tier = bMax(1n, tier - 1n);
+  }
+  return bonus;
+}
+
+function findNiceBonus(currentScore, rawBonus, nextDornCount) {   // Z.2401
+  const baseScore = currentScore + rawBonus;
+  const startOffset = B(Math.floor(Math.random()*301));
+
+  for (let i = 0n; i <= 300n; i++) {                      // Durchlauf 1
+    const extra = (startOffset + i) % 301n;
+    const candidate = baseScore + extra;
+    let good;
+    if (nextDornCount === 1) good = findCleanDivisors(candidate, 9).length > 0;
+    else {
+      const combo = findValidDividerCombination(candidate, nextDornCount);
+      good = combo.every(d => d !== 1);
+    }
+    if (good) return rawBonus + extra;
+  }
+  for (let i = 0n; i <= 300n; i++) {                      // Durchlauf 2
+    const extra = (startOffset + i) % 301n;
+    const candidate = baseScore + extra;
+    let good;
+    if (nextDornCount === 1) good = findCleanDivisors(candidate, 9).length > 0;
+    else {
+      const combo = findValidDividerCombination(candidate, nextDornCount);
+      const ones = combo.filter(d => d === 1).length;
+      good = ones <= Math.max(1, Math.floor(nextDornCount/4));
+    }
+    if (good) return rawBonus + extra;
+  }
+  return rawBonus + startOffset;
+}
+
+function evaluateResult() {                               // Z.2286
+  const totalDivisor = prodB(dornDividers);
+  const originalScore = score;
+  const expected = originalScore / totalDivisor;
+  const count = totalDivisor;
+
+  let correctTotal = 0n, wrongTotal = 0n;
+  for (const c of collectedNumbers) {
+    if (c.value === expected) correctTotal += B(c.multiplier);
+    else wrongTotal += B(c.multiplier);
+  }
+
+  if (wrongTotal > 0n) {                                  // Z.2305
+    failScoreBefore = score; failCorrectAnswer = expected;
+    failCollected = collectedNumbers.map(c => c.value);
+    addHighscoreEntry();
+    score = 0n; wasSuccess = false;
+  } else if (correctTotal === count) {                    // Z.2314
+    score *= 2n; wasSuccess = true;
+    if (difficulty === 4) {
+      const elapsed = now() - ballFlightStartTime;
+      const remainingSeconds = Math.floor(Math.max(0, flightDuration - elapsed)/1000);
+      const rawBonus = calculateTieredBonus(remainingSeconds);
+      const nextRound = round + 1;
+      const nextDornCount = nextRound<=3?1:nextRound<=6?2:nextRound<=10?3:nextRound<=15?4:
+        nextRound<=20?5:nextRound<=25?6:nextRound<=30?7:nextRound<=35?8:nextRound<=40?9:10;
+      const adjustedBonus = findNiceBonus(score, rawBonus, nextDornCount);
+      const finalScore = score + adjustedBonus;
+      const scoreBeforeBonus = score;
+      bonusTotal = finalScore - score;
+      bonusSecondsLeft = remainingSeconds;
+      bonusPointsAdded = 0n;
+      score = finalScore;
+      displayScore = scoreBeforeBonus;
+      gameState = S.BONUS;
+      startBonusAnimation();
+    }
+  } else if (correctTotal < count) {                      // Z.2351
+    failScoreBefore = score; failCorrectAnswer = expected;
+    failCollected = collectedNumbers.map(c => c.value);
+    const newScore = correctTotal*expected*2n;
+    if (newScore <= 0n) addHighscoreEntry();
+    score = newScore < 0n ? 0n : newScore;
+    wasSuccess = false;
+  } else {                                                // Z.2362
+    failScoreBefore = score; failCorrectAnswer = expected;
+    failCollected = collectedNumbers.map(c => c.value);
+    const excess = correctTotal - count;
+    score = count*expected*2n;
+    score -= excess*expected*3n;
+    if (score <= 0n) addHighscoreEntry();
+    if (score < 0n) score = 0n;
+    wasSuccess = false;
+  }
+
+  if (gameState !== S.BONUS) gameState = S.RESULT;
+  saveGameState();
+}
+
+function startBonusAnimation() {                          // Z.2435
+  gameState = S.BONUS;
+  const totalSecondsForAnim = bonusSecondsLeft;
+  if (bonusTimer) clearTimeout(bonusTimer);
+  const step = () => {
+    if (gameState !== S.BONUS) return;
+    if (bonusSecondsLeft > 0) {
+      const s = bonusSecondsLeft > 200 ? 10 : bonusSecondsLeft > 100 ? 5
+              : bonusSecondsLeft > 30 ? 2 : 1;
+      const actual = Math.min(s, bonusSecondsLeft);
+      bonusSecondsLeft -= actual;
+      const elapsed = totalSecondsForAnim - bonusSecondsLeft;
+      bonusPointsAdded = totalSecondsForAnim > 0
+        ? (bonusTotal * B(elapsed)) / B(totalSecondsForAnim) : bonusTotal;
+      displayScore = (score - bonusTotal) + bonusPointsAdded;
+      bonusTimer = setTimeout(step, 30);
+    } else {
+      bonusPointsAdded = bonusTotal;
+      displayScore = score;
+      gameState = S.RESULT;
+    }
+  };
+  bonusTimer = setTimeout(step, 30);
+}
+
+function resetGame() {                                    // Z.2507
+  if (score < 10n) { score = 100n; round = 1; }
+  else if (wasSuccess) round++;
+  if (round === 1) bowlPieces = [];
+  displayScore = score; displayRound = round;
+  gameState = S.IDLE;
+  isResetting = false;
+  ballX = springX; ballY = getBallOnSpringY();
+  springCompression = 0;
+  collectedNumbers = [];
+  numberPool = [];
+  currentMultiplier = 1;
+  proCountdownActive = false;
+  updateActiveDornCount();
+  updateAvailableDividers();
+  positionDorns();
+  saveGameState();
+}
+
+// ===============================================================
+//  SPEICHERN  (Z. 1430-1490)
+// ===============================================================
+
+// Alte Versionen dieser Datei haben unter denselben Schluesseln gespeichert -
+// mit fehlerhaften Werten aus der Fliesskomma-Rechnung. Ein Versionsschluessel
+// sorgt dafuer, dass solche Staende nicht weiterwirken.
+const SAVE_VERSION = '2';
+
+function loadGameState() {
+  try {
+    if (localStorage.getItem('db_version') !== SAVE_VERSION) {
+      localStorage.removeItem('db_score');
+      localStorage.removeItem('db_round');
+      localStorage.removeItem('db_difficulty');
+      localStorage.removeItem('db_sliderValue');
+      localStorage.removeItem('db_highscores');
+      localStorage.setItem('db_version', SAVE_VERSION);
+    }
+    score = B(localStorage.getItem('db_score') || '100');
+    round = parseInt(localStorage.getItem('db_round') || '1', 10);
+    difficulty = parseInt(localStorage.getItem('db_difficulty') || '0', 10);
+    sliderValue = parseFloat(localStorage.getItem('db_sliderValue') || '120');
+  } catch (e) { score = 100n; round = 1; difficulty = 0; sliderValue = 120; }
+  pendingDifficulty = difficulty;
+  pendingScoreAdjustment = score;
+  flightDuration = Math.floor(sliderValue*1000);
+  displayScore = score; displayRound = round;
+  updateActiveDornCount(); updateAvailableDividers(); positionDorns();
+}
+
+function saveGameState() {
+  if (demoSaved) return;   // Demo laeuft: nie den Demo-Zustand speichern
+  try {
+    localStorage.setItem('db_score', score.toString());
+    localStorage.setItem('db_round', String(round));
+    localStorage.setItem('db_difficulty', String(difficulty));
+    localStorage.setItem('db_sliderValue', String(sliderValue));
+  } catch (e) {}
+}
+
+function loadHighscores() {
+  try {
+    const raw = localStorage.getItem('db_highscores');
+    if (!raw) return;
+    highscores = JSON.parse(raw).map(o => ({
+      score: B(o.score), round: o.round, difficulty: o.difficulty || 0, date: o.date
+    }));
+  } catch (e) { highscores = []; }
+}
+
+function saveHighscores() {
+  try {
+    localStorage.setItem('db_highscores', JSON.stringify(highscores.map(e => ({
+      score: e.score.toString(), round: e.round, difficulty: e.difficulty, date: e.date
+    }))));
+  } catch (e) {}
+}
+
+function addHighscoreEntry() {                            // Z.1483
+  const d = new Date();
+  const pad = n => String(n).length < 2 ? '0' + n : String(n);
+  const date = pad(d.getDate()) + '.' + pad(d.getMonth()+1) + '.' + d.getFullYear();
+  highscores.push({ score: score, round: round, difficulty: difficulty, date: date });
+  highscores.sort((a,b) => (b.score > a.score) ? 1 : (b.score < a.score) ? -1 : 0);
+  if (highscores.length > 12) highscores.pop();
+  saveHighscores();
+}
+
+// ===============================================================
+//  EINGABE  (Z. 1695-1982)
+// ===============================================================
+
+function pos(e) {
+  // Simulierte Klicks aus dem Anleitungsfilm bringen die Spielkoordinaten
+  // schon mit - keine Umrechnung noetig.
+  if (e.__demo) return { x: e.__demo.x, y: e.__demo.y };
+  // Der Canvas wird skaliert dargestellt. Der Klick kommt in Bildschirm-
+  // Pixeln an und muss zurueck in die Original-Koordinaten.
+  const r = cv.getBoundingClientRect();
+  const t = e.changedTouches ? e.changedTouches[0] : e;
+  return {
+    x: (t.clientX - r.left) * (BASE_W / r.width),
+    y: (t.clientY - r.top)  * (BASE_H / r.height)
+  };
+}
+
+function hitCollected(px, py) {                           // Z.1818
+  const slotLeft = 30, slotTop = 180;
+  const ballsPerRow = 6;
+  let xOffset = slotLeft + 60, row = 0;
+  for (let i = 0; i < collectedNumbers.length; i++) {
+    if (row >= 3) break;
+    if (i > 0 && i % ballsPerRow === 0) {
+      row++; xOffset = slotLeft + 60;
+      if (row >= 3) break;
+    }
+    const yOffset = slotTop + 50 + row*60;
+    const dx = px - xOffset, dy = py - yOffset;
+    if (Math.sqrt(dx*dx + dy*dy) < 28) {
+      const removed = collectedNumbers.splice(i,1)[0];
+      const still = collectedNumbers.filter(c => c.value === removed.value).length;
+      if (still === 0) {
+        const b = numberPool.filter(n => n.value === removed.value)[0];
+        if (b) b.clicked = false;
+      }
+      return true;
+    }
+    xOffset += 100;
+  }
+  return false;
+}
+
+function onDown(e) {
+  e.preventDefault();
+  const p = pos(e), tNow = now();
+
+  // Beim ersten Tippen auf dem Handy Vollbild anfordern
+  if (!e.__demo && isPhone() && !document.fullscreenElement && !document.webkitFullscreenElement) {
+    const el = document.documentElement;
+    if (el.requestFullscreen) el.requestFullscreen();
+    else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+  }
+
+  // Film laeuft: jeder ECHTE Klick beendet ihn. Simulierte nicht.
+  if (!demoActive && demoSaved) { stopDemo(); return; }
+  if (demoActive && !e.__demo) { stopDemo(); return; }
+
+  // Anleitungs-Knopf
+  if (!demoActive && gameState === S.IDLE) {
+  const bx = W - 90, by = 70, r = 50;
+	if (Math.sqrt((p.x-bx)*(p.x-bx) + (p.y-by)*(p.y-by)) < r) {
+		startDemo();
+		return;
+	}
+  }
+
+  if (gameState === S.IDLE) {
+    if (p.x >= W - 300 && p.y >= H - 100) {               // Z.1700
+      loadHighscores(); gameState = S.HIGHSCORE; return;
+    }
+    for (let i = 0; i < dornPositions.length; i++) {      // Z.1707
+      const dx = p.x - dornPositions[i][0], dy = p.y - dornPositions[i][1];
+      if (Math.sqrt(dx*dx + dy*dy) < 55) {
+        tappedDornIndex = i; tappedDornShowUntil = tNow + 2000; return;
+      }
+    }
+    if (p.x >= sliderX && p.x <= sliderX + sliderWidth && Math.abs(p.y - sliderY) < 30) {
+      isDraggingSlider = true; updateSliderValue(p.x); return;
+    }
+    if (p.x >= diffSliderX && p.x <= diffSliderX + diffSliderWidth && Math.abs(p.y - diffSliderY) < 30) {
+      isDraggingDiffSlider = true; updateDifficultySliderValue(p.x); return;
+    }
+    const dx = p.x - springX, dy = p.y - springY;         // Z.1733
+    if (Math.sqrt(dx*dx + dy*dy) < 50) { startCharging(); return; }
+    return;
+  }
+
+  if (gameState === S.FLYING) {                           // Z.1771
+    for (let i = 0; i < dornPositions.length; i++) {
+      const dx = p.x - dornPositions[i][0], dy = p.y - dornPositions[i][1];
+      if (Math.sqrt(dx*dx + dy*dy) < 55) {
+        tappedDornIndex = i; tappedDornShowUntil = tNow + 2000; return;
+      }
+    }
+    const dx = p.x - springX, dy = p.y - springY;         // Z.1786
+    if (Math.sqrt(dx*dx + dy*dy) < 50) {
+      wasSkipped = true; ballFlightProgress = 1;
+      updateBallPosition(1); onImpact(); return;
+    }
+    for (const btn of multiplierButtons) {
+      if (p.x >= btn.x && p.x <= btn.x + btn.width &&
+          p.y >= btn.y - btn.height/2 && p.y <= btn.y + btn.height/2) {
+        currentMultiplier = (currentMultiplier === btn.value) ? 1 : btn.value; return;
+      }
+    }
+    for (const btn of numberPool) {
+      const bx = p.x - btn.x, by = p.y - btn.y;
+      if (Math.sqrt(bx*bx + by*by) < btn.radius) { collectNumber(btn); return; }
+    }
+    hitCollected(p.x, p.y);
+    return;
+  }
+
+  if (gameState === S.ANIMATING) {                        // Z.1853
+    for (const btn of multiplierButtons) {
+      if (p.x >= btn.x && p.x <= btn.x + btn.width &&
+          p.y >= btn.y - btn.height/2 && p.y <= btn.y + btn.height/2) {
+        currentMultiplier = (currentMultiplier === btn.value) ? 1 : btn.value; return;
+      }
+    }
+    for (const btn of numberPool) {
+      const bx = p.x - btn.x, by = p.y - btn.y;
+      if (Math.sqrt(bx*bx + by*by) < btn.radius) { collectNumber(btn); return; }
+    }
+    hitCollected(p.x, p.y);
+    return;
+  }
+
+  if (gameState === S.RESULT) {                           // Z.1909
+    if (!isResetting) { isResetting = true; gameState = S.IDLE; resetGame(); }
+    return;
+  }
+
+  if (gameState === S.HIGHSCORE) {                        // Z.1918
+    const cx = W/2, btnW = 130;
+    const bx = [cx-200, cx-65, cx+70];
+    for (let i = 0; i < 3; i++)
+      if (p.x >= bx[i] && p.x <= bx[i]+btnW && p.y >= 100 && p.y <= 145) {
+        highscoreSort = i; return;
+      }
+    if (p.y >= H - 100 && p.y <= H - 50) gameState = S.IDLE;
+    return;
+  }
+
+  if (gameState === S.CONFIRM_DIFFICULTY) {               // Z.1940
+    const cx = W/2, cy = H/2;
+    if (p.y >= cy + 60 && p.y <= cy + 130) {
+      if (p.x >= cx - 220 && p.x <= cx - 20) {
+        score = pendingScoreAdjustment;
+        difficulty = pendingDifficulty;
+        updateActiveDornCount(); updateAvailableDividers(); positionDorns();
+        gameState = S.IDLE; saveGameState();
+      } else if (p.x >= cx + 20 && p.x <= cx + 220) {
+        gameState = S.IDLE;
+      }
+    }
+    return;
+  }
+
+  if (gameState === S.BONUS) {                            // Z.1966
+    if (bonusTimer) clearTimeout(bonusTimer);
+    bonusPointsAdded = bonusTotal;
+    bonusSecondsLeft = 0;
+    displayScore = score;
+    gameState = S.RESULT;
+    return;
+  }
+}
+
+function onMove(e) {
+  e.preventDefault();
+  const p = pos(e);
+  if (gameState === S.IDLE) {                             // Z.1741
+    if (isDraggingSlider) { updateSliderValue(p.x); return; }
+    if (isDraggingDiffSlider) { updateDifficultySliderValue(p.x); return; }
+  }
+}
+
+function onUp(e) {
+  e.preventDefault();
+  if (gameState === S.IDLE) {                             // Z.1752
+    if (isDraggingSlider) { isDraggingSlider = false; saveGameState(); return; }
+    if (isDraggingDiffSlider) { isDraggingDiffSlider = false; saveGameState(); return; }
+  }
+  if (gameState === S.CHARGING) releaseBall();            // Z.1764
+}
+
+function updateSliderValue(touchX) {                      // Z.1984
+  const nx = Math.min(1, Math.max(0, (touchX - sliderX)/sliderWidth));
+  sliderValue = 1 + nx*299;
+  flightDuration = Math.floor(sliderValue*1000);
+}
+
+function updateDifficultySliderValue(touchX) {            // Z.1991
+  const nx = Math.min(1, Math.max(0, (touchX - diffSliderX)/diffSliderWidth));
+  const newDifficulty = Math.min(4, Math.max(0, Math.floor(nx*4)));
+  if (newDifficulty === difficulty) return;
+
+  // Z.1997-1999: Dornanzahl auf neuem Level pruefen
+  const newDornCount = newDifficulty===0?1:newDifficulty===1?2:newDifficulty===2?3:newDifficulty===3?4:5;
+
+  // Z.2000-2001 im Original:
+  //   val combo = findValidDividerCombination(score, newDornCount)
+  //   if (combo != null) { ... }
+  // Der Rueckgabetyp ist List<Int>, nicht List<Int>? - combo ist also NIE null.
+  // Die Bedingung ist immer wahr, der else-Zweig ab Z.2008 ist toter Code.
+  // 1:1 uebersetzt heisst das: immer wechseln, nie fragen.
+  const savedDiff = difficulty;
+  difficulty = newDifficulty;
+  const combo = findValidDividerCombination(score, newDornCount);
+  difficulty = savedDiff;
+
+  if (combo !== null) {                                   // Z.2001 - immer wahr
+    difficulty = newDifficulty;
+    updateActiveDornCount();
+    updateAvailableDividers();
+    positionDorns();
+    saveGameState();
+  } else {                                                // Z.2008 - unerreichbar
+    let adjustedScore = score, found = false;
+    for (let delta = 1n; delta <= 20n; delta++) {
+      const cands = [score + delta, score - delta];
+      for (const candidate of cands) {
+        if (candidate > 0n) {
+          const sd = difficulty;
+          difficulty = newDifficulty;
+          const c = findValidDividerCombination(candidate, newDornCount);
+          difficulty = sd;
+          if (c !== null) { adjustedScore = candidate; found = true; break; }
+        }
+      }
+      if (found) break;
+    }
+    pendingDifficulty = newDifficulty;
+    pendingScoreAdjustment = adjustedScore;
+    gameState = S.CONFIRM_DIFFICULTY;
+  }
+}
+
+// ===============================================================
+//  ANLEITUNGSFILM
+//  Ein Drehbuch aus Zeigerbewegungen und Klicks. Die Klicks laufen
+//  durch dieselbe onDown-Funktion wie echte Eingaben - der Film
+//  zeigt also das echte Spiel, nichts Nachgestelltes.
+//  Gespielt wird auf einer Kopie des Zustands: Score, Runde und
+//  Bestenliste bleiben unberuehrt.
+// ===============================================================
+
+let demoScript = [];        // {t, type, x, y}
+let demoIndex = 0;
+let demoPointer = { x: 0, y: 0, visible: false, pressed: false };
+let demoSaved = null;
+
+
+// Der Film loest die Runde: er rechnet aus, wieviele Kugeln fehlen,
+// waehlt den groessten passenden Multiplikator und sammelt eine Kugel.
+// Wiederholt sich, bis die Zahl genau stimmt - wie beim echten Spielen.
+let demoPlan = [];      // Liste der noch noetigen Multiplikatoren
+
+function demoBuildPlan() {
+  demoPlan = [];
+  const totalDivisor = prodB(dornDividers);
+  if (totalDivisor <= 0n || score % totalDivisor !== 0n) return;
+  let rest = Number(totalDivisor);        // so viele Kugeln braucht es
+  const werte = multiplierButtons.map(m => m.value).sort((a,b) => b-a);
+  for (const m of werte) {
+    while (rest >= m) { demoPlan.push(m); rest -= m; }
+  }
+  for (let i = 0; i < rest; i++) demoPlan.push(1);   // Rest einzeln
+}
+
+function demoSolveStep() {
+  if (!demoPlan.length) return;
+  const m = demoPlan.shift();
+  const totalDivisor = prodB(dornDividers);
+  if (totalDivisor <= 0n || score % totalDivisor !== 0n) return;
+  const want = score / totalDivisor;
+
+  // passenden Multiplikator anklicken (x1 = kein Multiplikator)
+  if (m > 1) {
+    const b = multiplierButtons.filter(x => x.value === m)[0];
+    if (b) {
+      demoPointer.x = b.x + b.width/2; demoPointer.y = b.y;
+      demoTap(demoPointer.x, demoPointer.y);
+    }
+  } else if (currentMultiplier !== 1) {
+    const b = multiplierButtons.filter(x => x.value === currentMultiplier)[0];
+    if (b) {   // nochmal klicken schaltet zurueck auf 1
+      demoPointer.x = b.x + b.width/2; demoPointer.y = b.y;
+      demoTap(demoPointer.x, demoPointer.y);
+    }
+  }
+  // dann die richtige Kugel
+  const ball = numberPool.filter(n => n.value === want)[0];
+  if (ball) {
+    demoPointer.x = ball.x; demoPointer.y = ball.y;
+    later(() => demoTap(ball.x, ball.y), 300);
+  }
+}
+
+function demoTapWrong() {
+  const totalDivisor = prodB(dornDividers);
+  if (totalDivisor <= 0n || score % totalDivisor !== 0n) return;
+  const want = score / totalDivisor;
+  const wrong = numberPool.filter(n => n.value !== want)[0];
+  if (!wrong) return;
+
+  // 1. Zeiger zur falschen Kugel und 1. Tipp
+  demoPointer.x = wrong.x; demoPointer.y = wrong.y;
+  demoTap(wrong.x, wrong.y);
+
+  // 2. Kurze Pause, dann 2. Tipp auf dieselbe falsche Kugel
+  setTimeout(() => {
+    if (!demoActive && !demoSaved) return;
+    demoPointer.x = wrong.x; demoPointer.y = wrong.y;
+    demoTap(wrong.x, wrong.y);
+  }, 1000);
+
+  // 3. Pause, dann erste gesammelte Kugel aus Kollektion entfernen
+  setTimeout(() => {
+    if (!demoActive && !demoSaved) return;
+    demoPointer.x = 90; demoPointer.y = 230;
+    demoTap(90, 230);
+  }, 2200);
+
+  // 4. Kurze Pause, zweite gesammelte Kugel entfernen
+  setTimeout(() => {
+    if (!demoActive && !demoSaved) return;
+    demoPointer.x = 90; demoPointer.y = 230;
+    demoTap(90, 230);
+  }, 3200);
+}
+
+function demoAt(t, type, x, y) { demoScript.push({ t, type, x, y }); }
+
+function buildDemoScript() {
+  demoScript = [];
+  demoIndex = 0;
+
+  // Zeiten in SPIELZEIT (ms). Bei 5x Tempo sind 35s Film = 7s echt.
+  // Ablauf wie im echten Spiel: erst laden, dann waehrend des Flugs
+  // die Dornen lesen und die Loesung eingeben, zum Schluss den Ball
+  // per Federtipp durchspringen lassen.
+
+  // 1. Feder halten -> Anzeige faellt von 5m0s auf rund 1m
+  demoAt( 1000, 'move', springX, springY);
+  demoAt( 2000, 'down', springX, springY);
+  demoAt( 5200, 'up',   springX, springY);            // ~1 Min Flugzeit
+
+  // 2. Waehrend des Flugs: Dornen antippen, Teiler werden sichtbar
+  for (let i = 0; i < Math.min(5, dornPositions.length); i++) {
+    const d = dornPositions[i];
+    demoAt( 7000 + i*2000, 'move', d[0], d[1]);
+    demoAt( 7800 + i*2000, 'tap',  d[0], d[1]);
+  }
+
+  // 3. Falsche Zahl zweimal sammeln und wieder entfernen
+  //    (laeuft in echter Zeit via setTimeout, damit es langsam genug sichtbar ist)
+  demoAt(16000, 'wrong', 0, 0);
+
+  // 4. Loesen: Multiplikator fuer Multiplikator, bis die Zahl exakt stimmt.
+  demoAt(24000, 'plan', 0, 0);
+  for (let i = 0; i < 20; i++) demoAt(24500 + i*600, 'solve', 0, 0);
+
+  // 5. Ball durchspringen lassen
+  demoAt(38000, 'move', springX, springY);
+  demoAt(39000, 'tap',  springX, springY);            // Skip -> Aufspaltung
+
+  // 6. Kugeln fallen, Ergebnis erscheint
+  demoAt(44000, 'end', 0, 0);
+}
+
+function startDemo() {
+  // Zustand sichern
+  demoSaved = {
+    score, round, displayScore, displayRound, difficulty, gameState,
+    sliderValue, collectedNumbers, numberPool, bowlPieces, activePieces,
+    currentMultiplier, dornDividers, activeDornCount, highscores
+  };
+  // Film-Szenario: Level 20 in Legend - 5 Dornen, Score 50.000.
+  // Die Teiler ergeben 1000 Kugeln a 50. Ohne Multiplikator muesste
+  // man 1000 mal klicken - mit einem x1000-Klick reicht EINE Kugel.
+  // Genau dafuer sind die Multiplikatoren da, und genau das zeigt der Film.
+  score = 7308875104n; round = 20; displayScore = 7308875104n; displayRound = 20;
+  difficulty = 4;                       // Legend
+  sliderValue = 300;                    // Maximum - so sieht man die Zeit
+  flightDuration = 300000;              // beim Federhalten deutlich sinken
+  collectedNumbers = []; numberPool = []; bowlPieces = []; activePieces = [];
+  currentMultiplier = 1;
+  activeDornCount = 5;                  // Legend, Runde 20 -> 5 Dornen
+  positionDorns();
+  // Eine Kombination ohne 1er-Dornen suchen - die teilen ja nichts.
+  // In Legend duerfen die Teiler auch groesser als 9 sein (Primfaktoren).
+  dornDividers = null;
+  for (let t = 0; t < 400; t++) {
+    const c = findValidDividerCombination(score, activeDornCount);
+    if (score % prodB(c) === 0n && c.every(d => d > 1)) { dornDividers = c; break; }
+  }
+  if (!dornDividers) dornDividers = findValidDividerCombination(score, activeDornCount);
+  gameState = S.IDLE;
+  ballX = springX; ballY = getBallOnSpringY();
+  springCompression = 0;
+
+  buildDemoScript();
+  demoPointer.visible = true;
+  demoPointer.pressed = false;
+  demoPointer.x = springX; demoPointer.y = springY;
+
+  demoClockStart = Date.now();
+  demoRealStart = Date.now();
+  demoActive = true;
+}
+
+function stopDemo() {
+  demoActive = false;
+  demoPointer.visible = false;
+  if (demoSaved) {
+    score = demoSaved.score; round = demoSaved.round;
+    displayScore = demoSaved.displayScore; displayRound = demoSaved.displayRound;
+    difficulty = demoSaved.difficulty;
+    sliderValue = demoSaved.sliderValue;
+    flightDuration = Math.floor(sliderValue*1000);
+    collectedNumbers = demoSaved.collectedNumbers;
+    numberPool = demoSaved.numberPool;
+    bowlPieces = demoSaved.bowlPieces;
+    activePieces = demoSaved.activePieces;
+    currentMultiplier = demoSaved.currentMultiplier;
+    dornDividers = demoSaved.dornDividers;
+    activeDornCount = demoSaved.activeDornCount;
+    highscores = demoSaved.highscores;
+    demoSaved = null;
+  }
+  updateActiveDornCount();
+  updateAvailableDividers();
+  positionDorns();
+  gameState = S.IDLE;
+  ballX = springX; ballY = getBallOnSpringY();
+  springCompression = 0;
+  saveGameState();   // echten Zustand zurueckschreiben
+}
+
+// Simulierter Klick - laeuft durch die echte Eingabe
+function demoTap(x, y) {
+  demoPointer.pressed = true;
+  onDown({ preventDefault(){}, clientX: 0, clientY: 0, __demo: { x, y } });
+  setTimeout(() => { demoPointer.pressed = false; }, 60);
+}
+
+function updateDemo() {
+  if (!demoActive) return;
+  const t = now() - demoClockStart;
+
+  while (demoIndex < demoScript.length && demoScript[demoIndex].t <= t) {
+    const step = demoScript[demoIndex];
+    demoIndex++;
+
+    if (step.type === 'end') { demoActive = false; return; }
+
+    if (step.type === 'move') {
+      if (step.x || step.y) { demoPointer.x = step.x; demoPointer.y = step.y; }
+      continue;
+    }
+    if (step.type === 'tap') {
+      demoPointer.x = step.x; demoPointer.y = step.y;
+      demoTap(step.x, step.y);
+      continue;
+    }
+    if (step.type === 'down') {
+      demoPointer.x = step.x; demoPointer.y = step.y;
+      demoPointer.pressed = true;
+      onDown({ preventDefault(){}, __demo: { x: step.x, y: step.y } });
+      continue;
+    }
+    if (step.type === 'up') {
+      demoPointer.pressed = false;
+      onUp({ preventDefault(){}, __demo: { x: step.x, y: step.y } });
+      continue;
+    }
+    if (step.type === 'wrong') { demoTapWrong(); continue; }
+    if (step.type === 'plan') { demoBuildPlan(); continue; }
+    if (step.type === 'solve') {
+      // Der Film loest die Runde so, wie ein Spieler es tun wuerde:
+      // groesster passender Multiplikator zuerst, dann der Rest.
+      demoSolveStep();
+      continue;
+    }
+  }
+}
+
+function drawDemoPointer() {
+  if (!demoPointer.visible) return;
+  const x = demoPointer.x, y = demoPointer.y;
+
+  // Schatten beim Bewegen
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  ctx.beginPath(); ctx.arc(x + 4, y + 5, 26, 0, Math.PI*2); ctx.fill();
+
+  // Zeiger
+  ctx.fillStyle = demoPointer.pressed ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.55)';
+  ctx.beginPath(); ctx.arc(x, y, 24, 0, Math.PI*2); ctx.fill();
+  ctx.strokeStyle = '#FFD700'; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.arc(x, y, 24, 0, Math.PI*2); ctx.stroke();
+
+  // Klick-Blitz
+  if (demoPointer.pressed) {
+    ctx.strokeStyle = 'rgba(255,215,0,0.9)'; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.arc(x, y, 44, 0, Math.PI*2); ctx.stroke();
+  }
+}
+
+function drawDemoButton() {
+  if (demoActive) return;
+  const bx = W - 90, by = 70, r = 30;
+  // Kugel
+  const g = ctx.createRadialGradient(bx - r*0.3, by - r*0.3, 0, bx, by, r);
+  g.addColorStop(0, '#4a90d9'); g.addColorStop(0.6, '#1a5fa8'); g.addColorStop(1, '#0d3b6e');
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(bx, by, r, 0, Math.PI*2); ctx.fill();
+  // Glanzpunkt
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.beginPath(); ctx.arc(bx - r*0.35, by - r*0.35, r*0.28, 0, Math.PI*2); ctx.fill();
+  // Rand
+  ctx.strokeStyle = '#FFD700'; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.arc(bx, by, r, 0, Math.PI*2); ctx.stroke();
+  // Fragezeichen
+  ctx.font = 'bold ' + fs(54) + 'px Arial'; ctx.fillStyle = '#FFD700';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.shadowColor = '#000'; ctx.shadowBlur = 6;
+  ctx.fillText('?', bx, by + 3);
+  ctx.shadowBlur = 0;
+}
+
+// ===============================================================
+//  HAUPTSCHLEIFE
+// ===============================================================
+
+function loop() {
+  const tNow = now();
+
+  if (gameState === S.CHARGING) {                         // Z.2046
+    const elapsed = tNow - chargingStartTime;
+    springCompression = Math.min(1, elapsed/maxChargeTime);
+    if (tNow - dividerRattleTimer > dividerRattleInterval) {
+      dornDividers = findValidDividerCombination(score, activeDornCount);
+      dividerRattleTimer = tNow;
+    }
+  }
+
+  if (gameState === S.FLYING) {                           // Z.2087
+    const elapsed = tNow - ballFlightStartTime;
+    ballFlightProgress = Math.min(1, elapsed/flightDuration);
+    updateBallPosition(ballFlightProgress);
+
+    if (difficulty >= 3 && !proCountdownActive && dornPositions.length) {   // Z.2096
+      const last = dornPositions[dornPositions.length-1];
+      const dx = ballX - last[0], dy = ballY - last[1];
+      if (Math.sqrt(dx*dx + dy*dy) < 80) {
+        proCountdownActive = true; proCountdownStartTime = tNow;
+      }
+    }
+    if (proCountdownActive && tNow - proCountdownStartTime >= proCountdownDuration) {
+      proCountdownActive = false; onImpact();
+    } else if (ballFlightProgress >= 1) {
+      onImpact();
+    }
+  }
+
+  updateDemo();
+  onDraw();
+  requestAnimationFrame(loop);
+}
+
+cv.addEventListener('mousedown', onDown);
+cv.addEventListener('mousemove', onMove);
+cv.addEventListener('mouseup', onUp);
+cv.addEventListener('touchstart', onDown, { passive:false });
+cv.addEventListener('touchmove', onMove, { passive:false });
+cv.addEventListener('touchend', onUp, { passive:false });
+window.addEventListener('resize', resize);
+window.addEventListener('beforeunload', saveGameState);
+document.addEventListener('visibilitychange', function(){ if (document.hidden) saveGameState(); });
+// Vollbild: nach dem Wechsel kurz warten bis Browser fertig ist, dann neu skalieren
+document.addEventListener('fullscreenchange',       () => setTimeout(resize, 400));
+document.addEventListener('webkitfullscreenchange', () => setTimeout(resize, 400));
+
+resize();
+loadGameState();
+loadHighscores();
+dornDividers = findValidDividerCombination(score, activeDornCount);
+loop();
+</script>
+</body>
+</html>
