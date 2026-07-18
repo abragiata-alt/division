@@ -120,6 +120,18 @@ let multiplierMaxScroll = 0;     // maximaler Scroll-Weg (wird beim Zeichnen ges
 let mulScrollDragging = false, mulScrollStartY = 0, mulScrollStartOffset = 0, mulScrollMoved = false;
 let unlockAnimUntil = 0, unlockAnimText = '';   // Freischalt-Animation (dezent)
 
+// Punkte-Erklaerung am Ende der Anleitung (PLATZHALTER - Text frei aenderbar).
+// Erscheint in den letzten Sekunden des Anleitungsfilms.
+const demoInfoTitle = 'Punkte';
+const demoInfoLines = [
+  'Deine Basis wird in Teiler zerlegt.',
+  'Genau richtig gesammelt: Basis \u00D7 2',
+  'Zu wenig: gesammelt \u00D7 Ergebnis \u00D7 2',
+  'Zu viel: Basis \u00D7 2 \u2212 \u00DCberschuss \u00D7 Ergebnis \u00D7 3',
+  'Etwas Falsches dabei: 0 Punkte',
+  'Zeitbonus (Legend): fr\u00FChe Zeit z\u00E4hlt mehr'
+];
+
 let sliderX = 0, sliderY = 0, sliderWidth = 0, sliderValue = 120;
 let isDraggingSlider = false;
 let diffSliderX = 0, diffSliderY = 0, diffSliderWidth = 0, isDraggingDiffSlider = false;
@@ -1061,6 +1073,7 @@ function onDraw() {                                       // Z.560
 
   drawDemoButton();
   drawDemoPointer();
+  drawDemoInfo();
   drawUnlockAnim();
 }
 
@@ -1090,6 +1103,42 @@ function drawUnlockAnim() {
   ctx.font = 'bold ' + fs(34) + 'px Arial';
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.fillText(unlockAnimText, cx, cy);
+  ctx.restore();
+}
+
+// Punkte-Erklaerung unter dem Endbild der Anleitung. Sichtbar, sobald der Film
+// durchgelaufen ist und das Endbild auf den Tap wartet (demoSaved gesetzt, Film aus).
+// Text steht in demoInfoTitle/demoInfoLines (Platzhalter, frei aenderbar).
+function drawDemoInfo() {
+  if (demoActive || !demoSaved) return;
+  const cx = W/2;
+  const lineH = fs(46);
+  const titleH = fs(56);
+  const padY = 40;
+  const bh = padY*2 + titleH + demoInfoLines.length*lineH;
+  const bw = W*0.86;
+  const top = H*0.34;
+
+  ctx.save();
+  ctx.globalAlpha = 0.96;
+  ctx.fillStyle = 'rgba(15,15,32,0.94)';
+  rr(cx - bw/2, top, bw, bh, 20); ctx.fill();
+  ctx.strokeStyle = '#FFD700'; ctx.lineWidth = 3;
+  rr(cx - bw/2, top, bw, bh, 20); ctx.stroke();
+
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#FFD700';
+  ctx.font = 'bold ' + fs(42) + 'px Arial';
+  let y = top + padY + titleH/2;
+  ctx.fillText(demoInfoTitle, cx, y);
+
+  y += titleH/2 + lineH/2;
+  ctx.font = 'bold ' + fs(30) + 'px Arial';
+  ctx.fillStyle = '#ffffff';
+  for (const line of demoInfoLines) {
+    ctx.fillText(line, cx, y);
+    y += lineH;
+  }
   ctx.restore();
 }
 
@@ -1593,13 +1642,15 @@ function onDown(e) {
   if (!demoActive && demoSaved) { stopDemo(); return; }
   if (demoActive && !e.__demo) { stopDemo(); return; }
 
-  // Anleitungs-Knopf
-  if (!demoActive && gameState === S.IDLE) {
-  const bx = W - 90, by = 70, r = 50;
-	if (Math.sqrt((p.x-bx)*(p.x-bx) + (p.y-by)*(p.y-by)) < r) {
-		startDemo();
-		return;
-	}
+  // Anleitungs-Knopf (Fragezeichen) - IMMER klickbar, egal in welcher Phase.
+  // Laeuft gerade eine Runde, friert startDemo() sie vollstaendig ein; nach
+  // der Anleitung setzt stopDemo() sie exakt an derselben Stelle fort.
+  if (!demoActive) {
+    const bx = W - 90, by = 70, r = 50;
+    if (Math.sqrt((p.x-bx)*(p.x-bx) + (p.y-by)*(p.y-by)) < r) {
+      startDemo();
+      return;
+    }
   }
 
   if (gameState === S.IDLE) {
@@ -1927,11 +1978,19 @@ function buildDemoScript() {
 }
 
 function startDemo() {
-  // Zustand sichern
+  // Zustand sichern - VOLLSTAENDIG, damit eine laufende Runde exakt eingefroren
+  // und danach an derselben Stelle fortgesetzt werden kann.
   demoSaved = {
     score, round, displayScore, displayRound, difficulty, gameState,
     sliderValue, collectedNumbers, numberPool, bowlPieces, activePieces,
-    currentMultiplier, dornDividers, activeDornCount, highscores
+    currentMultiplier, dornDividers, activeDornCount, highscores,
+    // Flug-/Zeit-/Animationswerte fuer echtes Pausieren:
+    ballX, ballY, ballFlightStartTime, ballFlightProgress, flightDuration,
+    springCompression, chargingStartTime, currentDornIndex, animationStartTime,
+    wasSkipped, proCountdownActive, proCountdownStartTime,
+    tappedDornIndex, tappedDornShowUntil, pendingDifficulty, pendingScoreAdjustment,
+    // Zeitpunkt der Pause (echte Uhr) - fuer die Zeit-Verschiebung beim Fortsetzen:
+    pauseRealTime: Date.now()
   };
   // Film-Szenario: Level 20 in Legend - 5 Dornen, Score 50.000.
   // Die Teiler ergeben 1000 Kugeln a 50. Ohne Multiplikator muesste
@@ -1973,11 +2032,16 @@ function stopDemo() {
   demoActive = false;
   demoPointer.visible = false;
   if (demoSaved) {
+    // War beim Oeffnen der Anleitung eine Runde aktiv? (nicht IDLE/RESULT etc.)
+    const wasInRound = (demoSaved.gameState === S.CHARGING ||
+                        demoSaved.gameState === S.FLYING ||
+                        demoSaved.gameState === S.ANIMATING ||
+                        demoSaved.gameState === S.EVALUATING);
+
     score = demoSaved.score; round = demoSaved.round;
     displayScore = demoSaved.displayScore; displayRound = demoSaved.displayRound;
     difficulty = demoSaved.difficulty;
     sliderValue = demoSaved.sliderValue;
-    flightDuration = Math.floor(sliderValue*1000);
     collectedNumbers = demoSaved.collectedNumbers;
     numberPool = demoSaved.numberPool;
     bowlPieces = demoSaved.bowlPieces;
@@ -1986,8 +2050,46 @@ function stopDemo() {
     dornDividers = demoSaved.dornDividers;
     activeDornCount = demoSaved.activeDornCount;
     highscores = demoSaved.highscores;
+
+    updateActiveDornCount();
+    updateExpansion();
+    isInitialized = false; initializePositions();
+    updateAvailableDividers();
+    positionDorns();
+
+    if (wasInRound) {
+      // ---- Pausierte Runde exakt fortsetzen ----
+      // Alle Flug-/Animationswerte zuruecksetzen
+      flightDuration = demoSaved.flightDuration;
+      ballX = demoSaved.ballX; ballY = demoSaved.ballY;
+      ballFlightProgress = demoSaved.ballFlightProgress;
+      springCompression = demoSaved.springCompression;
+      currentDornIndex = demoSaved.currentDornIndex;
+      wasSkipped = demoSaved.wasSkipped;
+      proCountdownActive = demoSaved.proCountdownActive;
+      tappedDornIndex = demoSaved.tappedDornIndex;
+      tappedDornShowUntil = demoSaved.tappedDornShowUntil;
+      pendingDifficulty = demoSaved.pendingDifficulty;
+      pendingScoreAdjustment = demoSaved.pendingScoreAdjustment;
+
+      // Zeit-Verschiebung: um wie viel echte Zeit war pausiert?
+      // now() ist im Normalspiel Date.now(), also verschieben wir die
+      // absoluten Start-Zeitstempel um die Pausendauer nach vorn -> die
+      // Uhr zaehlt exakt dort weiter, wo sie eingefroren wurde.
+      const pausedMs = Date.now() - demoSaved.pauseRealTime;
+      ballFlightStartTime = demoSaved.ballFlightStartTime + pausedMs;
+      chargingStartTime = demoSaved.chargingStartTime + pausedMs;
+      animationStartTime = demoSaved.animationStartTime + pausedMs;
+      proCountdownStartTime = demoSaved.proCountdownStartTime + pausedMs;
+
+      gameState = demoSaved.gameState;   // z.B. FLYING - Runde laeuft weiter
+      demoSaved = null;
+      return;                            // NICHT auf IDLE zuruecksetzen!
+    }
+
     demoSaved = null;
   }
+  // Anleitung war ausserhalb einer Runde -> wie bisher zurueck auf IDLE
   updateActiveDornCount();
   updateExpansion();
   isInitialized = false; initializePositions();
