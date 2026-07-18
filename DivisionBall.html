@@ -1677,14 +1677,15 @@ function onDown(e) {
   if (gameState === S.INTRO) {
     const elapsed = performance.now() - introStartTime;
     if (elapsed >= INTRO_DURATION * 0.75) {
-      // Vollbild sofort anfordern
+      // Ein Druck -> sofort Vollbild UND Spielwechsel zusammen. Keine blockierende
+      // Pause davor. Die Groesse/Schrift setzt der fullscreenchange-Handler danach
+      // ohnehin selbst (siehe unten, setTimeout(resize,...)).
       const el = document.documentElement;
       if (el.requestFullscreen) el.requestFullscreen().catch(()=>{});
       else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
       else if (el.mozRequestFullScreen) el.mozRequestFullScreen();
       lockPortrait();
-      // Spiel erst nach 800ms starten damit resize() die Vollbild-Dimensionen bekommt
-      setTimeout(() => { gameState = S.IDLE; }, 800);
+      gameState = S.IDLE;
     }
     return;
   }
@@ -1829,17 +1830,6 @@ function onMove(e) {
 function onUp(e) {
   e.preventDefault();
   if (mulScrollDragging) { mulScrollDragging = false; mulScrollMoved = false; }
-  // Firefox braucht touchend fuer Vollbild - aber NICHT bei simulierten Demo-Klicks,
-  // sonst wird waehrend des schnellen Anleitungsfilms staendig Fullscreen/Orientation
-  // angefordert (ruckelt in Firefox stark).
-  if (!e.__demo &&
-      !document.fullscreenElement && !document.webkitFullscreenElement && !document.mozFullScreenElement && isPhone() && gameState !== S.INTRO) {
-    const el = document.documentElement;
-    if (el.requestFullscreen) el.requestFullscreen().catch(()=>{});
-    else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
-    else if (el.mozRequestFullScreen) el.mozRequestFullScreen();
-    lockPortrait();
-  }
   if (gameState === S.IDLE) {                             // Z.1752
     if (isDraggingSlider) { isDraggingSlider = false; saveGameState(); return; }
     if (isDraggingDiffSlider) { isDraggingDiffSlider = false; saveGameState(); return; }
@@ -2386,7 +2376,19 @@ cv.addEventListener('touchmove', onMove, { passive:false });
 cv.addEventListener('touchend', onUp, { passive:false });
 window.addEventListener('resize', resize);
 window.addEventListener('beforeunload', saveGameState);
-document.addEventListener('visibilitychange', function(){ if (document.hidden) saveGameState(); });
+document.addEventListener('visibilitychange', function(){
+  if (document.hidden) { saveGameState(); return; }
+  // Zurueck im Vordergrund (z.B. aus anderer App): Vollbild wiederherstellen, falls verloren.
+  // Hinweis: Browser koennen Vollbild ohne direkte Nutzer-Geste ablehnen - dann greift
+  // es erst beim naechsten Tippen. Der Aufruf schadet aber nicht.
+  if (isPhone() && !document.fullscreenElement && !document.webkitFullscreenElement && !document.mozFullScreenElement && gameState !== S.INTRO) {
+    const el = document.documentElement;
+    if (el.requestFullscreen) el.requestFullscreen().catch(()=>{});
+    else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+    else if (el.mozRequestFullScreen) el.mozRequestFullScreen();
+    lockPortrait();
+  }
+});
 // Vollbild: nach dem Wechsel kurz warten bis Browser fertig ist, dann neu skalieren
 document.addEventListener('fullscreenchange',       () => setTimeout(resize, 400));
 document.addEventListener('webkitfullscreenchange', () => setTimeout(resize, 400));
