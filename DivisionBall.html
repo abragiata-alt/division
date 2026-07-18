@@ -112,6 +112,14 @@ let bankLeft = 0, bankTop = 0, bankRight = 0, bankBottom = 0;
 let numberPool = [], collectedNumbers = [];
 let currentMultiplier = 1, multiplierButtons = [];
 
+// --- Erweiterung ab Runde 20/25: mehr Multiplikator-Reihen + groessere Collection Area ---
+let expandedLayout = false;      // true, sobald >3 Multiplikator-Reihen aktiv sind
+let multiplierRowCount = 3;      // 3, 4 oder 5 sichtbare Reihen
+let multiplierScrollY = 0;       // Scroll-Offset des Multiplikator-Bereichs
+let multiplierMaxScroll = 0;     // maximaler Scroll-Weg (wird beim Zeichnen gesetzt)
+let mulScrollDragging = false, mulScrollStartY = 0, mulScrollStartOffset = 0, mulScrollMoved = false;
+let unlockAnimUntil = 0, unlockAnimText = '';   // Freischalt-Animation (dezent)
+
 let sliderX = 0, sliderY = 0, sliderWidth = 0, sliderValue = 120;
 let isDraggingSlider = false;
 let diffSliderX = 0, diffSliderY = 0, diffSliderWidth = 0, isDraggingDiffSlider = false;
@@ -325,11 +333,25 @@ function resize() {
 
 function initializePositions() {                          // Z.266
   if (isInitialized || W <= 0 || H <= 0) return;
+
+  // Reihen-Zustand aus der Runde ableiten (ohne Animation beim Init/Resize)
+  multiplierRowCount = (round >= 25) ? 5 : (round >= 20) ? 4 : 3;
+  expandedLayout = (multiplierRowCount > 3);
+
+  // Im erweiterten Layout beginnt die Bank etwas tiefer (Collection Area groesser),
+  // dafuer wird die vertikale Flugbahn gestaucht (Ecke rutscht nach unten),
+  // damit Dorn 6 wieder auf der Ecke sitzt und die Bahn horizontal gleich bleibt.
+  const bankTopFrac = expandedLayout ? 0.52 : 0.45;
+
   bankLeft = W*0.15; bankRight = W*0.85;
-  bankTop = H*0.45;  bankBottom = H*0.75;
+  bankTop = H*bankTopFrac;  bankBottom = H*0.75;
   springX = W*0.12;  springY = H*0.88;
   bowlX = W*0.88;    bowlY = H*0.88;
-  segment1EndY = 380 + (bankTop - 380)/2;
+
+  // Ecke (Uebergang senkrecht->horizontal). Im erweiterten Layout tiefer gesetzt,
+  // damit die vertikale Roehre kuerzer wird und Dorn 6 auf der Ecke landet.
+  const cornerBase = expandedLayout ? collectionBottom() + 40 : 380;
+  segment1EndY = cornerBase + (bankTop - cornerBase)/2;
   segment2EndX = W*0.88;
   ballX = springX; ballY = getBallOnSpringY();
   sliderX = 120; sliderY = 60; sliderWidth = 300;
@@ -337,8 +359,16 @@ function initializePositions() {                          // Z.266
   createMultiplierButtons();
   isInitialized = true;
   updateActiveDornCount();
+  updateExpansion();
   updateAvailableDividers();
   positionDorns();
+}
+
+// Untere Kante der Collection Area - abhaengig davon, ob erweitert (5 Reihen) oder nicht (3).
+function collectionBottom() {
+  const rows = expandedLayout ? 5 : 3;
+  const rowH = 60;
+  return 180 + 60 + (rows-1)*rowH + 30;   // slotTop-Bereich + Reihen + Rand
 }
 
 function getBallOnSpringY() {                             // Z.2539
@@ -351,10 +381,15 @@ function createMultiplierButtons() {                      // Z.313
   const rows = [
     { v:[5,10,20,50,100,200], l:['\u00D75','\u00D710','\u00D720','\u00D750','\u00D7100','\u00D7200'], dy:0 },
     { v:[500,1000,2000,5000,10000,20000], l:['\u00D7500','\u00D71k','\u00D72k','\u00D75k','\u00D710k','\u00D720k'], dy:48 },
-    { v:[50000,100000,200000,500000,1000000,5000000], l:['\u00D750k','\u00D7100k','\u00D7200k','\u00D7500k','\u00D71M','\u00D75M'], dy:96 }
+    { v:[50000,100000,200000,500000,1000000,5000000], l:['\u00D750k','\u00D7100k','\u00D7200k','\u00D7500k','\u00D71M','\u00D75M'], dy:96 },
+    // Reihe 4 (ab Runde 20): Schema 5/10/20/50/100/200/500/1000 laeuft weiter
+    { v:[10000000,20000000,50000000,100000000,200000000,500000000], l:['\u00D710M','\u00D720M','\u00D750M','\u00D7100M','\u00D7200M','\u00D7500M'], dy:144 },
+    // Reihe 5 (ab Runde 25)
+    { v:[1000000000,2000000000,5000000000,10000000000,20000000000,50000000000], l:['\u00D71B','\u00D72B','\u00D75B','\u00D710B','\u00D720B','\u00D750B'], dy:192 }
   ];
   const spacing = (bankRight - bankLeft - 80) / 6;
-  for (const r of rows)
+  const visibleRows = rows.slice(0, multiplierRowCount);
+  for (const r of visibleRows)
     for (let i = 0; i < r.v.length; i++)
       multiplierButtons.push({ label:r.l[i], x:bankLeft+40+i*spacing, y:topY+r.dy,
                                width:bw, height:bh, value:r.v[i] });
@@ -371,15 +406,47 @@ function updateActiveDornCount() {                        // Z.348
     activeDornCount = round<=5?1:round<=10?2:round<=20?3:round<=30?4:4+Math.floor((round-30)/10);
 }
 
+// Legt anhand der Runde fest, wie viele Multiplikator-Reihen sichtbar sind.
+// Gilt fuer ALLE Schwierigkeitsstufen gleich (Feintuning pro Stufe spaeter).
+// Loest bei einer NEUEN Freischaltung die dezente Belohnungs-Animation aus.
+function updateExpansion() {
+  let rows = 3;
+  if (round >= 25) rows = 5;
+  else if (round >= 20) rows = 4;
+
+  if (rows > multiplierRowCount && isInitialized) {
+    // Neue Reihe(n) gerade freigeschaltet -> dezente Animation
+    unlockAnimText = 'Freigeschaltet!';
+    unlockAnimUntil = now() + 1800;
+  }
+  multiplierRowCount = rows;
+  expandedLayout = (rows > 3);
+}
+
 function positionDorns() {                                // Z.386
   dornPositions = [];
   const dornSpacing = 110;
   const rightX = W*0.88;
   const lowestDornY = bowlY - 150;
-  for (let i = 0; i < Math.min(activeDornCount, 4); i++)
-    dornPositions.push([rightX, lowestDornY - i*dornSpacing]);
-  if (activeDornCount >= 5) dornPositions.push([rightX, lowestDornY - 4*dornSpacing]);
-  if (activeDornCount >= 6) dornPositions.push([rightX, segment1EndY]);
+
+  // Dorne 1-5 stapeln sich senkrecht von unten nach oben.
+  // Dorn 6 sitzt GENAU auf der Ecke (segment1EndY). Damit zwischen Dorn 5 und 6
+  // kein Sprung entsteht, wird der Abstand der oberen Dorne so gewaehlt, dass der
+  // Stapel gleichmaessig an der Ecke ankommt (statt fix 110px + Sprung).
+  const vSlots = Math.min(activeDornCount, 6);   // wie viele Dorne im senkrechten Teil (inkl. Ecke)
+  if (vSlots >= 6) {
+    // 6 Positionen gleichmaessig von unten (lowestDornY) bis zur Ecke (segment1EndY)
+    const span = lowestDornY - segment1EndY;
+    const step = span / 5;                       // 5 Abstaende zwischen 6 Dornen
+    for (let i = 0; i < 6; i++)
+      dornPositions.push([rightX, lowestDornY - i*step]);
+  } else {
+    // weniger als 6 Dorne: normaler fixer Abstand, kein Ecken-Bezug noetig
+    for (let i = 0; i < vSlots; i++)
+      dornPositions.push([rightX, lowestDornY - i*dornSpacing]);
+  }
+
+  // Dorne 7+ laufen ab der Ecke horizontal nach links.
   if (activeDornCount >= 7) {
     const slots = Math.min(activeDornCount - 6, 3);
     for (let i = 0; i < slots; i++)
@@ -516,7 +583,7 @@ function drawSpring() {                                   // Z.884
 }
 
 function drawDorn(x, y, divider) {                        // Z.990
-  const radius = 45;
+  const radius = 50;
   const g = ctx.createRadialGradient(x, y, 0, x, y, radius);
   g.addColorStop(0,'#444444'); g.addColorStop(1,'#222222');
   ctx.fillStyle = g;
@@ -572,60 +639,116 @@ function drawNumberBank() {                               // Z.1097
   ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
   ctx.fillText('NUMBER BANK', (bankLeft+bankRight)/2, bankTop - 15);
 
+  // Sichtbares Fenster fuer die Multiplikatoren: immer nur so hoch wie 3 Reihen.
+  // Bei mehr als 3 Reihen wird der Bereich scrollbar (Clipping + multiplierScrollY).
+  const win = multiplierWindow();
+  const scrollable = multiplierRowCount > 3;
+  multiplierMaxScroll = scrollable ? Math.max(0, (multiplierRowCount-3)*48) : 0;
+  if (multiplierScrollY > multiplierMaxScroll) multiplierScrollY = multiplierMaxScroll;
+  if (multiplierScrollY < 0) multiplierScrollY = 0;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(bankLeft, win.top, bankRight-bankLeft, win.height);
+  ctx.clip();
+
   for (const btn of multiplierButtons) {                  // Z.1118
+    const drawY = btn.y - multiplierScrollY;
+    // ausserhalb des Fensters? ueberspringen (leichte Reserve)
+    if (drawY + btn.height/2 < win.top - 4 || drawY - btn.height/2 > win.top + win.height + 4) continue;
     const isActive = (btn.value === currentMultiplier && currentMultiplier !== 1);
     ctx.strokeStyle = isActive ? '#FFD700' : '#666666';
     ctx.lineWidth = 2;
-    rr(btn.x, btn.y - btn.height/2, btn.width, btn.height, 4); ctx.stroke();
+    rr(btn.x, drawY - btn.height/2, btn.width, btn.height, 4); ctx.stroke();
     ctx.font = 'bold ' + fs(20) + 'px Arial'; ctx.fillStyle = '#FFD700';
-    ctx.fillText(btn.label, btn.x + btn.width/2, btn.y + 6);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+    ctx.fillText(btn.label, btn.x + btn.width/2, drawY + 6);
+  }
+  ctx.restore();
+
+  // Scroll-Indikator (dezent), nur wenn scrollbar
+  if (scrollable && multiplierMaxScroll > 0) {
+    const trackX = bankRight - 10;
+    const ratio = multiplierScrollY / multiplierMaxScroll;
+    const thumbH = win.height * (win.height / (win.height + multiplierMaxScroll));
+    const thumbY = win.top + ratio * (win.height - thumbH);
+    ctx.fillStyle = 'rgba(255,215,0,0.15)';
+    rr(trackX, win.top, 4, win.height, 2); ctx.fill();
+    ctx.fillStyle = 'rgba(255,215,0,0.55)';
+    rr(trackX, thumbY, 4, thumbH, 2); ctx.fill();
   }
 }
 
+// Geometrie des sichtbaren Multiplikator-Fensters (immer 3 Reihen hoch).
+function multiplierWindow() {
+  const topY = bankTop + 25;
+  const top = topY - 44/2 - 6;          // knapp oberhalb der ersten Reihe
+  const height = 3*48 + 20;             // Platz fuer 3 Reihen (mit etwas Puffer)
+  return { top, height };
+}
+
+// Gemeinsame Geometrie der Collection Area - von Zeichnen UND Klick-Erkennung genutzt,
+// damit beide nie auseinanderlaufen. 8 Kugeln pro Reihe; 3 Reihen normal, 5 erweitert.
+function collectionGeom() {
+  const slotLeft = 30, slotTop = 180, slotRight = W - 30;
+  const ballsPerRow = 8;
+  const maxRows = expandedLayout ? 5 : 3;
+  const rowH = 60;
+  const slotBottom = slotTop + 50 + (maxRows-1)*rowH + 40;
+  const firstX = slotLeft + 60;
+  // Schritt dynamisch aus der Kastenbreite, damit 8 Kugeln sicher hineinpassen.
+  const usable = (slotRight - 30) - firstX;
+  const stepX = usable / (ballsPerRow - 1);
+  return { slotLeft, slotTop, slotRight, slotBottom, ballsPerRow, maxRows, rowH, firstX, stepX };
+}
+
 function drawCollectionSlot() {                           // Z.1141
-  const slotLeft = 30, slotTop = 180, slotRight = W - 30, slotBottom = 380;
+  const G = collectionGeom();
   ctx.fillStyle = '#1a1a2e';
-  rr(slotLeft, slotTop, slotRight-slotLeft, slotBottom-slotTop, 12); ctx.fill();
+  rr(G.slotLeft, G.slotTop, G.slotRight-G.slotLeft, G.slotBottom-G.slotTop, 12); ctx.fill();
   ctx.strokeStyle = '#0f3460'; ctx.lineWidth = 3;
-  rr(slotLeft, slotTop, slotRight-slotLeft, slotBottom-slotTop, 12); ctx.stroke();
+  rr(G.slotLeft, G.slotTop, G.slotRight-G.slotLeft, G.slotBottom-G.slotTop, 12); ctx.stroke();
 
   ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
   ctx.font = 'bold ' + fs(24) + 'px Arial'; ctx.fillStyle = '#FFD700';
-  ctx.fillText('Collected:', slotLeft + 15, slotTop - 8);
+  ctx.fillText('Collected:', G.slotLeft + 15, G.slotTop - 8);
   ctx.textAlign = 'center';
 
-  const ballsPerRow = 6;
-  let xOffset = slotLeft + 60, row = 0;
+  let xOffset = G.firstX, row = 0;
   for (let index = 0; index < collectedNumbers.length; index++) {
-    if (row >= 3) break;
-    if (index > 0 && index % ballsPerRow === 0) {
-      row++; xOffset = slotLeft + 60;
-      if (row >= 3) break;
+    if (row >= G.maxRows) break;
+    if (index > 0 && index % G.ballsPerRow === 0) {
+      row++; xOffset = G.firstX;
+      if (row >= G.maxRows) break;
     }
     const item = collectedNumbers[index];
-    const yOffset = slotTop + 50 + row*60;
-    const g = ctx.createRadialGradient(xOffset, yOffset, 0, xOffset, yOffset, 28);
+    const yOffset = G.slotTop + 50 + row*G.rowH;
+    const g = ctx.createRadialGradient(xOffset, yOffset, 0, xOffset, yOffset, 24);
     g.addColorStop(0,'#4CAF50'); g.addColorStop(1,'#388E3C');
     ctx.fillStyle = g;
-    ctx.beginPath(); ctx.arc(xOffset, yOffset, 28, 0, Math.PI*2); ctx.fill();
-    ctx.fillStyle = '#fff'; ctx.font = 'bold ' + fs(20) + 'px Arial'; ctx.textAlign = 'center';
-    ctx.fillText(String(item.value), xOffset, yOffset + 7);
+    ctx.beginPath(); ctx.arc(xOffset, yOffset, 24, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = 'bold ' + fs(18) + 'px Arial'; ctx.textAlign = 'center';
+    ctx.fillText(String(item.value), xOffset, yOffset + 6);
     if (item.multiplier > 1) {                            // Z.1193
-      ctx.textAlign = 'left'; ctx.font = 'bold ' + fs(18) + 'px Arial'; ctx.fillStyle = '#FFD700';
-      ctx.fillText('\u00D7' + item.multiplier, xOffset + 32, yOffset + 6);
+      ctx.textAlign = 'left'; ctx.font = 'bold ' + fs(15) + 'px Arial'; ctx.fillStyle = '#FFD700';
+      ctx.fillText('\u00D7' + item.multiplier, xOffset + 26, yOffset + 5);
       ctx.textAlign = 'center';
     }
-    xOffset += 100;
+    xOffset += G.stepX;
   }
 }
 
 function fitFontForPool() {                               // Z.1208
-  const buttonSpacing = (bankRight - bankLeft) * 0.28;
+  // Verfuegbare Breite richtet sich nach dem tatsaechlichen Kugelabstand.
+  // Bei 2-Spalten-Layout (lange Zahlen) sind die Kugeln groesser -> mehr Platz.
+  const r = (numberPool[0] && numberPool[0].radius) || 45;
+  const buttonSpacing = r * 2.0;
+  const MIN_FONT = fs(20);                 // wird nicht unterschritten
   let sharedFontSize = fs(36);
   for (const btn of numberPool) {
     const text = String(btn.value);
     ctx.font = 'bold ' + sharedFontSize + 'px Arial';
-    while (ctx.measureText(text).width > buttonSpacing*0.95 && sharedFontSize > 10) {
+    while (ctx.measureText(text).width > buttonSpacing*0.95 && sharedFontSize > MIN_FONT) {
       sharedFontSize -= 2;
       ctx.font = 'bold ' + sharedFontSize + 'px Arial';
     }
@@ -938,6 +1061,36 @@ function onDraw() {                                       // Z.560
 
   drawDemoButton();
   drawDemoPointer();
+  drawUnlockAnim();
+}
+
+// Dezente Belohnungs-Animation beim Freischalten neuer Reihen.
+// Kurzer, ruhiger Ein-/Ausblend-Effekt - bewusst unaufdringlich (Platzhalter, leicht austauschbar).
+function drawUnlockAnim() {
+  const tNow = now();
+  if (tNow >= unlockAnimUntil) return;
+  const total = 1800, left = unlockAnimUntil - tNow, t = 1 - left/total;
+  // Ein- und Ausblenden (weich)
+  let alpha;
+  if (t < 0.2) alpha = t/0.2;
+  else if (t > 0.7) alpha = (1 - t)/0.3;
+  else alpha = 1;
+  alpha = Math.max(0, Math.min(1, alpha));
+
+  const cx = W/2, cy = H*0.30;
+  ctx.save();
+  ctx.globalAlpha = alpha * 0.9;
+  // sanfter Hintergrund-Streifen
+  ctx.fillStyle = 'rgba(20,20,40,0.85)';
+  const bw = 520, bh = 90;
+  rr(cx - bw/2, cy - bh/2, bw, bh, 16); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,215,0,0.6)'; ctx.lineWidth = 2;
+  rr(cx - bw/2, cy - bh/2, bw, bh, 16); ctx.stroke();
+  ctx.fillStyle = '#FFD700';
+  ctx.font = 'bold ' + fs(34) + 'px Arial';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(unlockAnimText, cx, cy);
+  ctx.restore();
 }
 
 // ===============================================================
@@ -970,19 +1123,35 @@ function generateNumberPool() {
     }
   }
 
-  const centerX = (bankLeft + bankRight)/2;
-  const centerY = bankTop + 320;
-  const spacingX = (bankRight - bankLeft)*0.28;
-  const spacingY = 110;
-
   const distractors = shuffle(allValues.filter(v => v > 0n && v !== correctValue)).slice(0,5);
   const values = shuffle([correctValue].concat(distractors));
+
+  // Laengste Zahl bestimmen -> entscheidet, ob 3 oder 2 Kugeln pro Reihe.
+  // Ziel: die Mindest-Schrift (POOL_MIN_FONT) soll nicht unterschritten werden muessen.
+  const POOL_MIN_FONT = fs(20);
+  let longest = 0;
+  ctx.font = 'bold ' + POOL_MIN_FONT + 'px Arial';
+  for (const v of values) longest = Math.max(longest, ctx.measureText(String(v)).width);
+
+  // Verfuegbare Breite pro Kugel bei 3 Spalten:
+  const width3 = (bankRight - bankLeft) * 0.28 * 0.95;
+  // Passt die laengste Zahl bei Mindestschrift NICHT in 3 Spalten -> auf 2 Spalten wechseln.
+  const cols = (longest > width3) ? 2 : 3;
+
+  const rows = Math.ceil(6 / cols);        // 3 Spalten -> 2 Reihen; 2 Spalten -> 3 Reihen
+  const centerX = (bankLeft + bankRight)/2;
+  const centerY = bankTop + (cols === 2 ? 300 : 320);
+  const spacingX = (bankRight - bankLeft) * (cols === 2 ? 0.34 : 0.28);
+  const spacingY = (cols === 2) ? 95 : 110;
+  const radius = (cols === 2) ? 52 : 45;
+
   let index = 0;
-  for (let row = 0; row < 2; row++)
-    for (let col = 0; col < 3; col++)
+  for (let row = 0; row < rows; row++)
+    for (let col = 0; col < cols; col++)
       if (index < values.length) {
-        numberPool.push({ value: values[index], x: centerX + (col-1)*spacingX,
-                          y: centerY + (row-0.5)*spacingY, radius: 45, clicked: false });
+        const cx = centerX + (col - (cols-1)/2)*spacingX;
+        const cy = centerY + (row - (rows-1)/2)*spacingY;
+        numberPool.push({ value: values[index], x: cx, y: cy, radius, clicked: false });
         index++;
       }
 }
@@ -1250,8 +1419,18 @@ function resetGame() {                                    // Z.2507
   currentMultiplier = 1;
   proCountdownActive = false;
   updateActiveDornCount();
+  const prevRows = multiplierRowCount;
+  updateExpansion();                       // aktualisiert Reihen + loest ggf. Animation aus
+  if (multiplierRowCount !== prevRows) {
+    // Layout hat sich geaendert -> Bank/Bahn/Collection neu vermessen.
+    // isInitialized zuruecksetzen, damit initializePositions durchlaeuft.
+    isInitialized = false;
+    initializePositions();                 // ruft updateExpansion erneut, aber ohne erneuten Trigger
+  } else {
+    createMultiplierButtons();
+    positionDorns();
+  }
   updateAvailableDividers();
-  positionDorns();
   saveGameState();
 }
 
@@ -1283,7 +1462,7 @@ function loadGameState() {
   pendingScoreAdjustment = score;
   flightDuration = Math.floor(sliderValue*1000);
   displayScore = score; displayRound = round;
-  updateActiveDornCount(); updateAvailableDividers(); positionDorns();
+  updateActiveDornCount(); updateExpansion(); updateAvailableDividers(); positionDorns();
 }
 
 function saveGameState() {
@@ -1343,18 +1522,17 @@ function pos(e) {
 }
 
 function hitCollected(px, py) {                           // Z.1818
-  const slotLeft = 30, slotTop = 180;
-  const ballsPerRow = 6;
-  let xOffset = slotLeft + 60, row = 0;
+  const G = collectionGeom();
+  let xOffset = G.firstX, row = 0;
   for (let i = 0; i < collectedNumbers.length; i++) {
-    if (row >= 3) break;
-    if (i > 0 && i % ballsPerRow === 0) {
-      row++; xOffset = slotLeft + 60;
-      if (row >= 3) break;
+    if (row >= G.maxRows) break;
+    if (i > 0 && i % G.ballsPerRow === 0) {
+      row++; xOffset = G.firstX;
+      if (row >= G.maxRows) break;
     }
-    const yOffset = slotTop + 50 + row*60;
+    const yOffset = G.slotTop + 50 + row*G.rowH;
     const dx = px - xOffset, dy = py - yOffset;
-    if (Math.sqrt(dx*dx + dy*dy) < 28) {
+    if (Math.sqrt(dx*dx + dy*dy) < 24) {
       const removed = collectedNumbers.splice(i,1)[0];
       const still = collectedNumbers.filter(c => c.value === removed.value).length;
       if (still === 0) {
@@ -1363,9 +1541,33 @@ function hitCollected(px, py) {                           // Z.1818
       }
       return true;
     }
-    xOffset += 100;
+    xOffset += G.stepX;
   }
   return false;
+}
+
+// Multiplikator-Treffer prüfen - berücksichtigt Scroll-Offset UND das sichtbare Fenster.
+// Von beiden Spielzuständen (FLYING, ANIMATING) genutzt, damit sie synchron bleiben.
+function hitMultiplier(px, py) {
+  const win = multiplierWindow();
+  if (py < win.top || py > win.top + win.height) return false;   // nur im Fenster
+  for (const btn of multiplierButtons) {
+    const drawY = btn.y - multiplierScrollY;
+    if (px >= btn.x && px <= btn.x + btn.width &&
+        py >= drawY - btn.height/2 && py <= drawY + btn.height/2) {
+      currentMultiplier = (currentMultiplier === btn.value) ? 1 : btn.value;
+      return true;
+    }
+  }
+  return false;
+}
+
+// Prüft, ob ein Druck im scrollbaren Multiplikator-Fenster begann (für Scroll-Drag).
+function inMultiplierWindow(px, py) {
+  const win = multiplierWindow();
+  return multiplierMaxScroll > 0 &&
+         px >= bankLeft && px <= bankRight &&
+         py >= win.top && py <= win.top + win.height;
 }
 
 function onDown(e) {
@@ -1433,12 +1635,12 @@ function onDown(e) {
       wasSkipped = true; ballFlightProgress = 1;
       updateBallPosition(1); onImpact(); return;
     }
-    for (const btn of multiplierButtons) {
-      if (p.x >= btn.x && p.x <= btn.x + btn.width &&
-          p.y >= btn.y - btn.height/2 && p.y <= btn.y + btn.height/2) {
-        currentMultiplier = (currentMultiplier === btn.value) ? 1 : btn.value; return;
-      }
+    // Scroll-Drag im Multiplikator-Fenster vormerken (wird erst bei Bewegung Scroll)
+    if (inMultiplierWindow(p.x, p.y)) {
+      mulScrollDragging = true; mulScrollStartY = p.y;
+      mulScrollStartOffset = multiplierScrollY; mulScrollMoved = false;
     }
+    if (hitMultiplier(p.x, p.y)) return;
     for (const btn of numberPool) {
       const bx = p.x - btn.x, by = p.y - btn.y;
       if (Math.sqrt(bx*bx + by*by) < btn.radius) { collectNumber(btn); return; }
@@ -1448,12 +1650,11 @@ function onDown(e) {
   }
 
   if (gameState === S.ANIMATING) {                        // Z.1853
-    for (const btn of multiplierButtons) {
-      if (p.x >= btn.x && p.x <= btn.x + btn.width &&
-          p.y >= btn.y - btn.height/2 && p.y <= btn.y + btn.height/2) {
-        currentMultiplier = (currentMultiplier === btn.value) ? 1 : btn.value; return;
-      }
+    if (inMultiplierWindow(p.x, p.y)) {
+      mulScrollDragging = true; mulScrollStartY = p.y;
+      mulScrollStartOffset = multiplierScrollY; mulScrollMoved = false;
     }
+    if (hitMultiplier(p.x, p.y)) return;
     for (const btn of numberPool) {
       const bx = p.x - btn.x, by = p.y - btn.y;
       if (Math.sqrt(bx*bx + by*by) < btn.radius) { collectNumber(btn); return; }
@@ -1506,6 +1707,17 @@ function onDown(e) {
 function onMove(e) {
   e.preventDefault();
   const p = pos(e);
+  // Multiplikator-Bereich scrollen (Schwelle ~10px unterscheidet Scroll vom Tap)
+  if (mulScrollDragging) {
+    const delta = mulScrollStartY - p.y;
+    if (Math.abs(delta) > 10) mulScrollMoved = true;
+    if (mulScrollMoved) {
+      multiplierScrollY = mulScrollStartOffset + delta;
+      if (multiplierScrollY < 0) multiplierScrollY = 0;
+      if (multiplierScrollY > multiplierMaxScroll) multiplierScrollY = multiplierMaxScroll;
+    }
+    return;
+  }
   if (gameState === S.IDLE) {                             // Z.1741
     if (isDraggingSlider) { updateSliderValue(p.x); return; }
     if (isDraggingDiffSlider) { updateDifficultySliderValue(p.x); return; }
@@ -1514,6 +1726,7 @@ function onMove(e) {
 
 function onUp(e) {
   e.preventDefault();
+  if (mulScrollDragging) { mulScrollDragging = false; mulScrollMoved = false; }
   // Firefox braucht touchend fuer Vollbild
   if (!document.fullscreenElement && !document.webkitFullscreenElement && !document.mozFullScreenElement && isPhone() && gameState !== S.INTRO) {
     const el = document.documentElement;
@@ -1730,7 +1943,9 @@ function startDemo() {
   flightDuration = 300000;              // beim Federhalten deutlich sinken
   collectedNumbers = []; numberPool = []; bowlPieces = []; activePieces = [];
   currentMultiplier = 1;
-  activeDornCount = 5;                  // Legend, Runde 20 -> 5 Dornen
+  updateExpansion();                    // round=20 -> Reihe 4 aktiv, Layout erweitern
+  isInitialized = false; initializePositions();
+  activeDornCount = 5;                  // Legend, Runde 20 -> 5 Dornen (nach Init setzen)
   positionDorns();
   // Eine Kombination ohne 1er-Dornen suchen - die teilen ja nichts.
   // In Legend duerfen die Teiler auch groesser als 9 sein (Primfaktoren).
@@ -1774,6 +1989,8 @@ function stopDemo() {
     demoSaved = null;
   }
   updateActiveDornCount();
+  updateExpansion();
+  isInitialized = false; initializePositions();
   updateAvailableDividers();
   positionDorns();
   gameState = S.IDLE;
