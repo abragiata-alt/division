@@ -339,7 +339,7 @@ function resize() {
     const physicalW = screen.width * dpr;
     const physicalH = screen.height * dpr;
     const physicalScale = Math.min(physicalW / BASE_W, physicalH / BASE_H);
-    fontScale = Math.min(2.0, 1 / physicalScale * 1);
+    fontScale = Math.min(2.0, 1 / physicalScale * 0.9);
   } else {
     fontScale = 1;
   }
@@ -1563,6 +1563,12 @@ function loadGameState() {
   flightDuration = Math.floor(sliderValue*1000);
   displayScore = score; displayRound = round;
   updateActiveDornCount(); updateExpansion(); updateAvailableDividers(); positionDorns();
+  // Vollstaendige Layout-Neuberechnung mit der GELADENEN Runde erzwingen.
+  // Beim Start liefen resize()/initializePositions() noch mit round=1 (Spielstand noch
+  // nicht geladen) -> nur 3 Reihen, kleine Collection. Jetzt neu vermessen, damit
+  // Reihen (ab R15/R27) und Collection-Groesse (ab R21) zur echten Runde passen.
+  isInitialized = false;
+  initializePositions();
 }
 
 function saveGameState() {
