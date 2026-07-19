@@ -91,6 +91,7 @@ let flightDuration = 2000, difficulty = 0, pendingDifficulty = 0, pendingScoreAd
 let bonusSecondsLeft = 0, bonusPointsAdded = 0n, bonusTotal = 0n, bonusTimer = null;
 
 let W = 0, H = 0, isInitialized = false;
+let canvasRect = null;   // eigene Canvas-Position/-Groesse (statt getBoundingClientRect)
 let fontScale = 1;
 function fs(size) { return Math.round(size * fontScale); }
 let springX = 0, springY = 0, bowlX = 0, bowlY = 0;
@@ -357,6 +358,13 @@ function resize() {
     cv.style.top = '';
   }
 
+  // Unsere EIGENEN Positions-/Groessenwerte merken. Die Touch-Umrechnung nutzt diese
+  // statt getBoundingClientRect(), weil Firefox beim Ein-/Ausblenden der Adressleiste
+  // falsche Rect-Werte liefern kann -> Touch waere dann verschoben.
+  canvasRect = phone
+    ? { left: Math.floor((winW - cssW) / 2), top: Math.floor((winH - cssH) / 2), width: cssW, height: cssH }
+    : null;
+
   const sx = (cssW * dpr) / BASE_W;
   ctx.setTransform(sx, 0, 0, sx, 0, 0);
 
@@ -453,7 +461,7 @@ function updateExpansion() {
   // Animation, wenn eine neue Multiplikator-Reihe ODER die Collection-Vergroesserung
   // gerade freigeschaltet wird.
   if (isInitialized && (rows > multiplierRowCount || (nowExpanded && !expandedLayout))) {
-    unlockAnimText = '♥ ♥♥  ♥♥♥   ♥♥♥   ♥♥♥♥';
+    unlockAnimText = '♥ ♥♥  ♥♥♥   ♥♥♥♥    ♥♥♥♥♥';
     unlockAnimUntil = now() + 2200;   // = FADE_IN(550) + HOLD(900) + FADE_OUT(750)
   }
   multiplierRowCount = rows;
@@ -1626,7 +1634,10 @@ function pos(e) {
   if (e.__demo) return { x: e.__demo.x, y: e.__demo.y };
   // Der Canvas wird skaliert dargestellt. Der Klick kommt in Bildschirm-
   // Pixeln an und muss zurueck in die Original-Koordinaten.
-  const r = cv.getBoundingClientRect();
+  // Wir nutzen UNSERE eigenen, in resize() gesetzten Werte (canvasRect) statt
+  // getBoundingClientRect(), das Firefox zeitweise falsch meldet. Fallback auf
+  // das Browser-Rect, falls canvasRect (noch) nicht gesetzt ist (z.B. Desktop).
+  const r = canvasRect || cv.getBoundingClientRect();
   const t = e.changedTouches ? e.changedTouches[0] : e;
   return {
     x: (t.clientX - r.left) * (BASE_W / r.width),
