@@ -1233,7 +1233,7 @@ function generateNumberPool() {
 
   // Laengste Zahl bestimmen -> entscheidet, ob 3 oder 2 Kugeln pro Reihe.
   // Ziel: die Mindest-Schrift (POOL_MIN_FONT) soll nicht unterschritten werden muessen.
-  const POOL_MIN_FONT = fs(24);
+  const POOL_MIN_FONT = fs(20);
   let longest = 0;
   ctx.font = 'bold ' + POOL_MIN_FONT + 'px Arial';
   for (const v of values) longest = Math.max(longest, ctx.measureText(String(v)).width);
@@ -2416,16 +2416,20 @@ window.addEventListener('resize', resize);
 window.addEventListener('beforeunload', saveGameState);
 document.addEventListener('visibilitychange', function(){
   if (document.hidden) { saveGameState(); return; }
-  // Zurueck im Vordergrund (z.B. aus anderer App): Vollbild wiederherstellen, falls verloren.
-  // Hinweis: Browser koennen Vollbild ohne direkte Nutzer-Geste ablehnen - dann greift
-  // es erst beim naechsten Tippen. Der Aufruf schadet aber nicht.
-  if (isPhone() && !document.fullscreenElement && !document.webkitFullscreenElement && !document.mozFullScreenElement && gameState !== S.INTRO) {
-    const el = document.documentElement;
-    if (el.requestFullscreen) el.requestFullscreen().catch(()=>{});
-    else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
-    else if (el.mozRequestFullScreen) el.mozRequestFullScreen();
-    lockPortrait();
-  }
+  // Zurueck im Vordergrund (z.B. aus anderer App): kurz warten, damit die App wirklich
+  // "angekommen" ist und die Fenstergroesse stabil steht, DANN erst die Befehle feuern
+  // (Vollbild wiederherstellen + neu vermessen/positionieren). Das resize() korrigiert
+  // die verschobene Optik.
+  setTimeout(function(){
+    if (isPhone() && !document.fullscreenElement && !document.webkitFullscreenElement && !document.mozFullScreenElement && gameState !== S.INTRO) {
+      const el = document.documentElement;
+      if (el.requestFullscreen) el.requestFullscreen().catch(()=>{});
+      else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+      else if (el.mozRequestFullScreen) el.mozRequestFullScreen();
+      lockPortrait();
+    }
+    resize();
+  }, 150);
 });
 // Vollbild: nach dem Wechsel kurz warten bis Browser fertig ist, dann neu skalieren
 document.addEventListener('fullscreenchange',       () => setTimeout(resize, 400));
