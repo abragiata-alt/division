@@ -1690,7 +1690,7 @@ function onDown(e) {
   // beim Loslassen (touchend/onUp) ausgeloest, wo die Geste akzeptiert wird.
   if (gameState === S.INTRO) {
     const elapsed = performance.now() - introStartTime;
-    if (elapsed >= INTRO_DURATION * 0.75) introStartPending = true;
+    if (elapsed >= INTRO_DURATION * 0.5) introStartPending = true;
     return;
   }
 
