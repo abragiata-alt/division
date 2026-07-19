@@ -782,7 +782,7 @@ function drawCollectionSlot() {                           // Z.1141
     const g = ctx.createRadialGradient(xOffset, yOffset, 0, xOffset, yOffset, 24);
     g.addColorStop(0,'#4CAF50'); g.addColorStop(1,'#388E3C');
     ctx.fillStyle = g;
-    ctx.beginPath(); ctx.arc(xOffset, yOffset, 24, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(xOffset, yOffset, 27, 0, Math.PI*2); ctx.fill();
     ctx.fillStyle = '#fff'; ctx.font = 'bold ' + fs(18) + 'px Arial'; ctx.textAlign = 'center';
     ctx.fillText(String(item.value), xOffset, yOffset + 6);
     if (item.multiplier > 1) {                            // Z.1193
