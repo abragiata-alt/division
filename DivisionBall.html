@@ -145,6 +145,16 @@ let unlockAnimUntil = 0, unlockAnimText = '';   // Freischalt-Animation (dezent)
 let removeFlashes = [];
 let introStartPending = false;   // Intro-Start-Tipp erkannt, Vollbild folgt bei touchend
 
+// Zwei-Finger-Lupe: kurzzeitiger optischer Zoom, aendert das Spiel-Layout NICHT.
+// zoomActive: Lupe laeuft (2 Finger). zoomFactor: aktuelle Vergroesserung (stufenlos).
+// zoomCX/zoomCY: Zentrum (Mitte zwischen den Fingern, in BASE-Koordinaten).
+// zoomStartDist: Fingerabstand beim Start (Referenz fuer stufenloses Zoomen).
+// touchLockUntilRelease: nach der Lupe kein Spielzug, bis ALLE Finger weg waren.
+let zoomActive = false, zoomFactor = 1, zoomCX = 0, zoomCY = 0, zoomStartDist = 0;
+let touchLockUntilRelease = false;
+let skipPending = false;   // Feder im Flug beruehrt -> Skip erst beim Loslassen (nicht bei Zoom)
+let lastCollectedByTap = null;   // zuletzt per Einzeltipp gesammelte Kugel (fuer Zoom-Undo)
+
 // Punkte-Erklaerung am Ende der Anleitung (PLATZHALTER - Text frei aenderbar).
 // Erscheint in den letzten Sekunden des Anleitungsfilms.
 const demoInfoTitle = 'Info';
@@ -160,7 +170,9 @@ const demoInfoLines = [
   '- falsche Auswahl: beendet das Spiel',
   '- Level "Legend":',
   '    +zusätzliche Zeitboni',
-  '    (kein simples verdoppeln mehr)'
+  '    (kein simples verdoppeln mehr)',
+  '- zwei Finger zoomen',
+  '- "Highscore": klick unter die Schale ->'
 ];
 
 let sliderX = 0, sliderY = 0, sliderWidth = 0, sliderValue = 120;
@@ -1066,6 +1078,15 @@ function onDraw() {                                       // Z.560
   ctx.fillStyle = '#1a1a2e';
   ctx.fillRect(0,0,W,H);
 
+  // Zwei-Finger-Lupe: alles Folgende zentriert auf die Fingermitte vergroessern.
+  // Rein optisch - Spiel-Layout/Koordinaten bleiben unveraendert.
+  if (zoomActive && zoomFactor > 1) {
+    ctx.save();
+    ctx.translate(zoomCX, zoomCY);
+    ctx.scale(zoomFactor, zoomFactor);
+    ctx.translate(-zoomCX, -zoomCY);
+  }
+
   drawTrack();
   if (gameState !== S.RESULT) drawNumberBank();           // Z.577
   drawCollectionSlot();
@@ -1111,6 +1132,9 @@ function onDraw() {                                       // Z.560
     drawNumberPool();                                    // Z.667
 
   drawRemoveFlashes();
+
+  // Lupe-Transform beenden (falls aktiv), damit Overlays/Dialoge normal gezeichnet werden.
+  if (zoomActive && zoomFactor > 1) ctx.restore();
 
   if (gameState === S.RESULT) drawResultMessage();
   if (gameState === S.CONFIRM_DIFFICULTY) drawConfirmDifficultyDialog();
@@ -1707,8 +1731,55 @@ function inMultiplierWindow(px, py) {
          py >= win.top && py <= win.top + win.height;
 }
 
+// Liefert Fingerabstand und Mittelpunkt (in BASE-Koordinaten) bei 2+ Fingern.
+function pinchInfo(e) {
+  if (!e.touches || e.touches.length < 2) return null;
+  const a = e.touches[0], b = e.touches[1];
+  const r = canvasRect || cv.getBoundingClientRect();
+  const ax = (a.clientX - r.left) * (BASE_W / r.width);
+  const ay = (a.clientY - r.top)  * (BASE_H / r.height);
+  const bx = (b.clientX - r.left) * (BASE_W / r.width);
+  const by = (b.clientY - r.top)  * (BASE_H / r.height);
+  const dx = bx - ax, dy = by - ay;
+  return { dist: Math.sqrt(dx*dx + dy*dy), cx: (ax+bx)/2, cy: (ay+by)/2 };
+}
+
 function onDown(e) {
   e.preventDefault();
+
+  // Zweiter Finger da? -> Lupe sofort starten, kein Spielzug.
+  if (e.touches && e.touches.length >= 2) {
+    const pi = pinchInfo(e);
+    if (pi) {
+      // Laufende Aktionen abbrechen, damit die Lupe keinen Schuss/Zug ausloest.
+      if (gameState === S.CHARGING) { gameState = S.IDLE; springCompression = 0; }
+      isDraggingSlider = false; isDraggingDiffSlider = false;
+      mulScrollDragging = false; mulScrollMoved = false;
+      skipPending = false;   // an der Feder begonnener Skip verfaellt bei Lupe
+      // Hat der noch gedrueckte erste Finger GERADE eine Kugel eingesammelt (Tipp noch
+      // nicht losgelassen)? Dann war das nur der Weg zur Lupe -> Kugel zurueckgeben.
+      // Bereits abgeschlossene Kugeln (Finger war zwischendurch weg) bleiben unberuehrt.
+      if (lastCollectedByTap) {
+        const btn = lastCollectedByTap;
+        btn.clicked = false;
+        // Die gerade gesammelte Kugel ist der ZULETZT hinzugefuegte Eintrag -> den entfernen.
+        // (Nicht nach value suchen: zwei Kugeln koennten denselben Wert haben.)
+        if (collectedNumbers.length) collectedNumbers.pop();
+        lastCollectedByTap = null;
+      }
+      zoomActive = true;
+      zoomStartDist = pi.dist || 1;
+      zoomCX = pi.cx; zoomCY = pi.cy;
+      zoomFactor = 1;
+      touchLockUntilRelease = true;   // nach der Lupe erst alle Finger weg
+    }
+    return;
+  }
+
+  // Nach einer Lupe: solange noch ein Finger auf dem Schirm ist, keinen Spielzug
+  // zulassen. Erst wenn ALLE Finger weg waren (onUp bei 0 Fingern), wieder frei.
+  if (touchLockUntilRelease) return;
+
   const p = pos(e), tNow = now();
 
   // Intro: Standbild muss sichtbar sein (t >= 0.75) damit Start-Tipp gilt.
@@ -1766,8 +1837,10 @@ function onDown(e) {
     }
     const dx = p.x - springX, dy = p.y - springY;         // Z.1786
     if (Math.sqrt(dx*dx + dy*dy) < 50) {
-      wasSkipped = true; ballFlightProgress = 1;
-      updateBallPosition(1); onImpact(); return;
+      // Skip NICHT sofort ausloesen - erst beim Loslassen (onUp), und nur wenn kein
+      // zweiter Finger die Lupe gestartet hat. So katapultiert ein Zoom-Versuch an der
+      // Feder den Ball nicht mehr versehentlich ins Ziel.
+      skipPending = true; return;
     }
     // Scroll-Drag im Multiplikator-Fenster vormerken (wird erst bei Bewegung Scroll)
     if (inMultiplierWindow(p.x, p.y)) {
@@ -1777,7 +1850,7 @@ function onDown(e) {
     if (hitMultiplier(p.x, p.y)) return;
     for (const btn of numberPool) {
       const bx = p.x - btn.x, by = p.y - btn.y;
-      if (Math.sqrt(bx*bx + by*by) < btn.radius) { collectNumber(btn); return; }
+      if (Math.sqrt(bx*bx + by*by) < btn.radius) { collectNumber(btn); lastCollectedByTap = btn; return; }
     }
     hitCollected(p.x, p.y);
     return;
@@ -1791,7 +1864,7 @@ function onDown(e) {
     if (hitMultiplier(p.x, p.y)) return;
     for (const btn of numberPool) {
       const bx = p.x - btn.x, by = p.y - btn.y;
-      if (Math.sqrt(bx*bx + by*by) < btn.radius) { collectNumber(btn); return; }
+      if (Math.sqrt(bx*bx + by*by) < btn.radius) { collectNumber(btn); lastCollectedByTap = btn; return; }
     }
     hitCollected(p.x, p.y);
     return;
@@ -1840,6 +1913,20 @@ function onDown(e) {
 
 function onMove(e) {
   e.preventDefault();
+
+  // Lupe aktiv: Fingerabstand bestimmt stufenlos die Vergroesserung.
+  if (zoomActive) {
+    const pi = pinchInfo(e);
+    if (pi) {
+      zoomCX = pi.cx; zoomCY = pi.cy;
+      let f = pi.dist / zoomStartDist;        // >1 = aufziehen
+      if (f < 1) f = 1;                       // nicht kleiner als normal
+      if (f > 3.5) f = 3.5;                   // ordentlich groesser, aber begrenzt
+      zoomFactor = f;
+    }
+    return;
+  }
+
   const p = pos(e);
   // Multiplikator-Bereich scrollen (Schwelle ~10px unterscheidet Scroll vom Tap)
   if (mulScrollDragging) {
@@ -1860,7 +1947,34 @@ function onMove(e) {
 
 function onUp(e) {
   e.preventDefault();
+
+  // Lupe: sobald weniger als 2 Finger anliegen, Zoom sofort beenden (zurueckspringen).
+  if (zoomActive && (!e.touches || e.touches.length < 2)) {
+    zoomActive = false;
+    zoomFactor = 1;
+  }
+  // Sind ALLE Finger weg? Dann Sperre aufheben - ab jetzt wieder normale Spielzuege.
+  if (!e.touches || e.touches.length === 0) {
+    touchLockUntilRelease = false;
+  }
+  // Ein Finger wurde gehoben -> laufender Tipp ist abgeschlossen. Ab jetzt gilt eine
+  // dabei gesammelte Kugel als fest eingesammelt (kann nicht mehr per Zoom zurueck).
+  lastCollectedByTap = null;
+  // Solange die Sperre noch aktiv ist (nach Lupe, noch Finger drauf): kein Spielzug.
+  if (touchLockUntilRelease) { if (mulScrollDragging) { mulScrollDragging = false; mulScrollMoved = false; } return; }
+
   if (mulScrollDragging) { mulScrollDragging = false; mulScrollMoved = false; }
+
+  // Aufgeschobener Skip: Feder wurde im Flug beruehrt. Jetzt beim Loslassen ausfuehren -
+  // aber nur wenn ALLE Finger weg sind (kein zweiter Finger = keine Lupe war im Spiel).
+  if (skipPending && (!e.touches || e.touches.length === 0)) {
+    skipPending = false;
+    if (gameState === S.FLYING) {
+      wasSkipped = true; ballFlightProgress = 1;
+      updateBallPosition(1); onImpact();
+    }
+    return;
+  }
 
   // Intro-Start: Vollbild beim Loslassen (touchend) anfordern - hier akzeptieren
   // die mobilen Browser die Geste zuverlaessig. Danach ins Spiel wechseln.
@@ -2210,6 +2324,7 @@ function stopDemo() {
 function demoTap(x, y) {
   demoPointer.pressed = true;
   onDown({ preventDefault(){}, clientX: 0, clientY: 0, __demo: { x, y } });
+  onUp({ preventDefault(){}, touches: [], __demo: { x, y } });
   setTimeout(() => { demoPointer.pressed = false; }, 60);
 }
 
