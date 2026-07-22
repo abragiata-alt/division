@@ -783,6 +783,18 @@ function drawCollectionSlot() {                           // Z.1141
   ctx.fillText('Collected:', G.slotLeft + 15, G.slotTop - 8);
   ctx.textAlign = 'center';
 
+  // Ebenen-Zuordnung NACH WERT: gleiche Zahlen stehen immer auf derselben Ebene,
+  // damit man sofort sieht, welche Kugeln zusammengehoeren (und wo eine falsche sitzt).
+  // 1 Wert  -> Mitte
+  // 2 Werte -> oben / unten
+  // 3+      -> oben / Mitte / unten (alle weiteren Werte auf die untere Ebene)
+  const ebeneVonWert = new Map();
+  for (const it of collectedNumbers) {
+    const key = String(it.value);
+    if (!ebeneVonWert.has(key)) ebeneVonWert.set(key, ebeneVonWert.size);
+  }
+  const anzahlWerte = ebeneVonWert.size;
+
   let xOffset = G.firstX, row = 0;
   for (let index = 0; index < collectedNumbers.length; index++) {
     if (row >= G.maxRows) break;
@@ -797,14 +809,16 @@ function drawCollectionSlot() {                           // Z.1141
     ctx.fillStyle = g;
     ctx.beginPath(); ctx.arc(xOffset, yOffset, 27, 0, Math.PI*2); ctx.fill();
 
-    // Zahl versetzt schreiben, wenn der Nachbar einen ANDEREN Wert hat - dann sitzt
-    // die eine Zahl in der oberen, die andere in der unteren Kugelhaelfte. Bei
-    // gleichen Werten bleiben sie auf derselben Ebene (kein unnoetiges Springen).
-    const prev = index > 0 ? collectedNumbers[index-1] : null;
-    const next = index < collectedNumbers.length-1 ? collectedNumbers[index+1] : null;
-    const anders = (prev && prev.value !== item.value) || (next && next.value !== item.value);
-    let textY = yOffset + 6;
-    if (anders) textY = (index % 2 === 0) ? yOffset - 4 : yOffset + 18;
+    // Ebene dieses Werts bestimmen (max. 3 Ebenen, alles darueber landet unten).
+    const ebene = Math.min(ebeneVonWert.get(String(item.value)) || 0, 2);
+    let textY = yOffset + 6;                       // Standard: Mitte (nur 1 Wert)
+    if (anzahlWerte === 2) {
+      textY = (ebene === 0) ? yOffset - 4 : yOffset + 18;      // oben / unten
+    } else if (anzahlWerte >= 3) {
+      textY = (ebene === 0) ? yOffset - 9                       // oben
+            : (ebene === 1) ? yOffset + 6                       // Mitte
+            : yOffset + 21;                                      // unten
+    }
 
     ctx.fillStyle = '#fff'; ctx.font = 'bold ' + fs(18) + 'px Arial'; ctx.textAlign = 'center';
     ctx.fillText(String(item.value), xOffset, textY);
