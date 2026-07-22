@@ -178,6 +178,8 @@ let isDraggingSlider = false;
 let diffSliderX = 0, diffSliderY = 0, diffSliderWidth = 0, isDraggingDiffSlider = false;
 
 let highscores = [], highscoreSort = 0;
+let highscoreScrollY = 0;          // Scroll-Offset der Bestenliste
+let hsScrollDragging = false, hsScrollStartY = 0, hsScrollStartOffset = 0, hsScrollMoved = false;
 
 const DIFF_LABELS = ['Easy','Medium','Hard','Pro','Legend'];
 
@@ -791,12 +793,22 @@ function drawCollectionSlot() {                           // Z.1141
     g.addColorStop(0,'#4CAF50'); g.addColorStop(1,'#388E3C');
     ctx.fillStyle = g;
     ctx.beginPath(); ctx.arc(xOffset, yOffset, 27, 0, Math.PI*2); ctx.fill();
+
+    // Zahl versetzt schreiben, wenn der Nachbar einen ANDEREN Wert hat - dann sitzt
+    // die eine Zahl in der oberen, die andere in der unteren Kugelhaelfte. Bei
+    // gleichen Werten bleiben sie auf derselben Ebene (kein unnoetiges Springen).
+    const prev = index > 0 ? collectedNumbers[index-1] : null;
+    const next = index < collectedNumbers.length-1 ? collectedNumbers[index+1] : null;
+    const anders = (prev && prev.value !== item.value) || (next && next.value !== item.value);
+    let textY = yOffset + 6;
+    if (anders) textY = (index % 2 === 0) ? yOffset - 4 : yOffset + 18;
+
     ctx.fillStyle = '#fff'; ctx.font = 'bold ' + fs(18) + 'px Arial'; ctx.textAlign = 'center';
-    ctx.fillText(String(item.value), xOffset, yOffset + 6);
+    ctx.fillText(String(item.value), xOffset, textY);
     if (item.multiplier > 1) {                            // Z.1193
-      ctx.textAlign = 'left'; ctx.font = 'bold ' + fs(15) + 'px Arial'; ctx.fillStyle = '#FFD700';
-      ctx.fillText('\u00D7' + item.multiplier, xOffset + 26, yOffset + 5);
-      ctx.textAlign = 'center';
+      // Multiplikator OBERHALB der Kugel - so ueberlappt er nicht mit den Nachbarn.
+      ctx.font = 'bold ' + fs(15) + 'px Arial'; ctx.fillStyle = '#FFD700';
+      ctx.fillText('\u00D7' + item.multiplier, xOffset, yOffset - 30);
     }
     xOffset += G.stepX;
   }
@@ -981,9 +993,20 @@ function drawHighscoreOverlay() {                         // Z.1492
   }
 
   const rowHeight = 70, startY = 175;
+  // Sichtbarer Listenbereich (zwischen Sortier-Knoepfen und Schliessen-Knopf)
+  const listTop = startY - 40, listBottom = H - 120;
+  const listH = listBottom - listTop;
+  const contentH = sorted.length * rowHeight;
+  const maxScroll = Math.max(0, contentH - listH);
+  if (highscoreScrollY > maxScroll) highscoreScrollY = maxScroll;
+  if (highscoreScrollY < 0) highscoreScrollY = 0;
+
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, listTop, W, listH); ctx.clip();
   for (let i = 0; i < sorted.length; i++) {
     const e = sorted[i];
-    const y = startY + i*rowHeight;
+    const y = startY + i*rowHeight - highscoreScrollY;
+    if (y < listTop - rowHeight || y > listBottom + rowHeight) continue;   // ausserhalb: ueberspringen
     ctx.fillStyle = (i % 2 === 0) ? 'rgba(255,255,255,0.235)' : 'rgba(255,255,255,0.078)';
     ctx.fillRect(30, y-36, W-60, 64);
 
@@ -999,6 +1022,18 @@ function drawHighscoreOverlay() {                         // Z.1492
     ctx.textAlign = 'right'; ctx.fillStyle = '#AAAAAA';
     ctx.fillText('Lvl ' + e.round, W-40, y+18);
     ctx.textAlign = 'center';
+  }
+  ctx.restore();
+
+  // Scrollbalken rechts, wenn die Liste laenger ist als der sichtbare Bereich
+  if (maxScroll > 0) {
+    const trackX = W - 18, trackH = listH;
+    ctx.fillStyle = 'rgba(255,255,255,0.12)';
+    rr(trackX, listTop, 6, trackH, 3); ctx.fill();
+    const thumbH = Math.max(40, trackH * (listH / contentH));
+    const thumbY = listTop + (trackH - thumbH) * (highscoreScrollY / maxScroll);
+    ctx.fillStyle = 'rgba(255,215,0,0.55)';
+    rr(trackX, thumbY, 6, thumbH, 3); ctx.fill();
   }
 
   if (sorted.length === 0) {
@@ -1653,7 +1688,7 @@ function addHighscoreEntry() {                            // Z.1483
   const date = pad(d.getDate()) + '.' + pad(d.getMonth()+1) + '.' + d.getFullYear();
   highscores.push({ score: score, round: round, difficulty: difficulty, date: date });
   highscores.sort((a,b) => (b.score > a.score) ? 1 : (b.score < a.score) ? -1 : 0);
-  if (highscores.length > 12) highscores.pop();
+  if (highscores.length > 39) highscores.pop();
   saveHighscores();
 }
 
@@ -1809,7 +1844,7 @@ function onDown(e) {
 
   if (gameState === S.IDLE) {
     if (p.x >= W - 300 && p.y >= H - 100) {               // Z.1700
-      loadHighscores(); gameState = S.HIGHSCORE; return;
+      loadHighscores(); highscoreScrollY = 0; gameState = S.HIGHSCORE; return;
     }
     for (let i = 0; i < dornPositions.length; i++) {      // Z.1707
       const dx = p.x - dornPositions[i][0], dy = p.y - dornPositions[i][1];
@@ -1880,9 +1915,14 @@ function onDown(e) {
     const bx = [cx-200, cx-65, cx+70];
     for (let i = 0; i < 3; i++)
       if (p.x >= bx[i] && p.x <= bx[i]+btnW && p.y >= 100 && p.y <= 145) {
-        highscoreSort = i; return;
+        highscoreSort = i; highscoreScrollY = 0; return;
       }
-    if (p.y >= H - 100 && p.y <= H - 50) gameState = S.IDLE;
+    if (p.y >= H - 100 && p.y <= H - 50) { gameState = S.IDLE; return; }
+    // Im Listenbereich: Scroll-Ziehen vormerken
+    if (p.y > 135 && p.y < H - 120) {
+      hsScrollDragging = true; hsScrollStartY = p.y;
+      hsScrollStartOffset = highscoreScrollY; hsScrollMoved = false;
+    }
     return;
   }
 
@@ -1928,6 +1968,14 @@ function onMove(e) {
   }
 
   const p = pos(e);
+
+  // Bestenliste scrollen
+  if (hsScrollDragging && gameState === S.HIGHSCORE) {
+    const dy = p.y - hsScrollStartY;
+    if (Math.abs(dy) > 10) hsScrollMoved = true;
+    highscoreScrollY = hsScrollStartOffset - dy;
+    return;
+  }
   // Multiplikator-Bereich scrollen (Schwelle ~10px unterscheidet Scroll vom Tap)
   if (mulScrollDragging) {
     const delta = mulScrollStartY - p.y;
@@ -1964,6 +2012,7 @@ function onUp(e) {
   if (touchLockUntilRelease) { if (mulScrollDragging) { mulScrollDragging = false; mulScrollMoved = false; } return; }
 
   if (mulScrollDragging) { mulScrollDragging = false; mulScrollMoved = false; }
+  if (hsScrollDragging) { hsScrollDragging = false; hsScrollMoved = false; }
 
   // Aufgeschobener Skip: Feder wurde im Flug beruehrt. Jetzt beim Loslassen ausfuehren -
   // aber nur wenn ALLE Finger weg sind (kein zweiter Finger = keine Lupe war im Spiel).
