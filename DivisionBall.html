@@ -170,9 +170,7 @@ const demoInfoLines = [
   '- falsche Auswahl: beendet das Spiel',
   '- Level "Legend":',
   '    +zusätzliche Zeitboni',
-  '    (kein simples verdoppeln mehr)',
-  '- zwei Finger zoomen',
-  '- "Highscore": klick unter die Schale ->'
+  '    (kein simples verdoppeln mehr)'
 ];
 
 let sliderX = 0, sliderY = 0, sliderWidth = 0, sliderValue = 120;
@@ -491,39 +489,37 @@ function updateExpansion() {
 
 function positionDorns() {                                // Z.386
   dornPositions = [];
-  const dornSpacing = 110;
   const rightX = W*0.88;
   const lowestDornY = bowlY - 150;
 
-  // Dorne 1-5 stapeln sich senkrecht von unten nach oben.
-  // Dorn 6 sitzt GENAU auf der Ecke (segment1EndY). Damit zwischen Dorn 5 und 6
-  // kein Sprung entsteht, wird der Abstand der oberen Dorne so gewaehlt, dass der
-  // Stapel gleichmaessig an der Ecke ankommt (statt fix 110px + Sprung).
-  const vSlots = Math.min(activeDornCount, 6);   // wie viele Dorne im senkrechten Teil (inkl. Ecke)
-  if (vSlots >= 6) {
-    // 6 Positionen gleichmaessig von unten (lowestDornY) bis zur Ecke (segment1EndY)
-    const span = lowestDornY - segment1EndY;
-    const step = span / 5;                       // 5 Abstaende zwischen 6 Dornen
-    for (let i = 0; i < 6; i++)
-      dornPositions.push([rightX, lowestDornY - i*step]);
-  } else {
-    // weniger als 6 Dorne: normaler fixer Abstand, kein Ecken-Bezug noetig
-    for (let i = 0; i < vSlots; i++)
-      dornPositions.push([rightX, lowestDornY - i*dornSpacing]);
-  }
+  // Die Dorne bilden eine DURCHGEHENDE Kette entlang der Flugbahn - vom Ende der Bahn
+  // (unten rechts) rueckwaerts Richtung Feder. Der Abstand ist ueberall gleich, auch
+  // ueber die Ecken hinweg, damit keine Spruenge entstehen.
+  //
+  // Der Abstand richtet sich nach dem senkrechten Abschnitt: 6 Dorne sollen
+  // gleichmaessig von unten bis zur Ecke sitzen (Dorn 6 genau auf der Ecke).
+  const spanSenkrecht = lowestDornY - segment1EndY;
+  const spacing = spanSenkrecht / 5;             // 5 Abstaende zwischen 6 Dornen
 
-  // Dorne 7+ laufen ab der Ecke horizontal nach links.
-  if (activeDornCount >= 7) {
-    const slots = Math.min(activeDornCount - 6, 3);
-    for (let i = 0; i < slots; i++)
-      dornPositions.push([segment2EndX - dornSpacing*(i+1), segment1EndY]);
-  }
-  if (activeDornCount >= 10) {
-    const slots = activeDornCount - 9;
-    const topY = segment1EndY + 60, bottomY = springY - 200;
-    const avail = bottomY - topY;
-    for (let i = 0; i < slots; i++)
-      dornPositions.push([springX, topY + (avail/(slots+1))*(i+1)]);
+  // Laengen der drei Bahnabschnitte (vom Ende rueckwaerts gemessen)
+  const lenSenkRechts = spanSenkrecht;                  // unten rechts -> Ecke
+  const lenWaagerecht = segment2EndX - springX;         // Ecke -> linke Ecke
+  // Danach senkrecht links hinunter Richtung Feder.
+
+  for (let i = 0; i < activeDornCount; i++) {
+    const d = i * spacing;                       // Distanz entlang der Bahn ab Dorn 1
+    if (d <= lenSenkRechts + 0.5) {
+      // senkrechter Abschnitt rechts
+      dornPositions.push([rightX, lowestDornY - d]);
+    } else if (d <= lenSenkRechts + lenWaagerecht) {
+      // waagerechter Abschnitt nach links
+      const rest = d - lenSenkRechts;
+      dornPositions.push([segment2EndX - rest, segment1EndY]);
+    } else {
+      // senkrechter Abschnitt links (Richtung Feder)
+      const rest = d - lenSenkRechts - lenWaagerecht;
+      dornPositions.push([springX, segment1EndY + rest]);
+    }
   }
 }
 
@@ -1606,6 +1602,10 @@ function loadGameState() {
     difficulty = parseInt(localStorage.getItem('db_difficulty') || '0', 10);
     sliderValue = parseFloat(localStorage.getItem('db_sliderValue') || '120');
   } catch (e) { score = 100n; round = 1; difficulty = 0; sliderValue = 120; }
+  // Wurde mit verlorenem Spiel gespeichert (Score auf 0 gesetzt, Runde noch hoch)?
+  // Dann wie bei resetGame() sauber zuruecksetzen - sonst koennte man im hohen Level
+  // mit 0 Punkten neu starten und sich ueber Zeitboni wieder hocharbeiten.
+  if (score < 10n) { score = 100n; round = 1; }
   pendingDifficulty = difficulty;
   pendingScoreAdjustment = score;
   flightDuration = Math.floor(sliderValue*1000);
@@ -2324,6 +2324,8 @@ function stopDemo() {
 function demoTap(x, y) {
   demoPointer.pressed = true;
   onDown({ preventDefault(){}, clientX: 0, clientY: 0, __demo: { x, y } });
+  // Skip liegt jetzt auf onUp -> ein Demo-Tap muss auch loslassen, sonst bliebe
+  // skipPending haengen und der Ball floege doppelt. touches:[] = alle Finger weg.
   onUp({ preventDefault(){}, touches: [], __demo: { x, y } });
   setTimeout(() => { demoPointer.pressed = false; }, 60);
 }
